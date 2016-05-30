@@ -1,6 +1,6 @@
 # The GoFY Programming Language
 
-GoFY is a superset of Go programming language.
+GoFY (prounounced go-fee) is a superset of Go programming language.
 
 # The GoFY Difference
 
