@@ -2,6 +2,20 @@
 
 GoFY is a superset of Go programming language.
 
+# The GoFY Difference
+
+GoFY is not different from GoLang, yet.
+
+# GoFY Desired Differences
+
+- Unused, unexported structs should cause a warning.
+- Declaring new variables after code should cause a warning; just like in C.
+- Define new keywords to [not] export a variable/function, regardless of case used for the name.
+- Allow local packages to be imported without having to use URL as needed for external packages.
+
+
+# The GoFY Programming Language
+
 Go is an open source programming language that makes it easy to build simple,
 reliable, and efficient software.
 
@@ -43,13 +57,4 @@ put the following in your .profile:
 	export PATH=$PATH:$GOROOT/bin
 
 See https://golang.org/doc/install or doc/install.html for more details.
-
-## The Name
-
-The name GoFY (Pronounced go-fee) stands for what the GoLang creators and
-purists would say if they hear these alternative ideas: Go F*** Yourself.
-
-So I say to them: GoFY
-
-It is *not* prounounced go-fi, to avoid confusion with pronounciation of go5.
 
