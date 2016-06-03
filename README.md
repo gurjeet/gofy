@@ -12,7 +12,7 @@ GoFY is not different from GoLang, yet.
 - Declaring new variables after code should cause a warning; just like in C.
 - Define new keywords to [not] export a variable/function, regardless of case used for the name.
 - Allow local packages to be imported without having to use URL as needed for external packages.
-
+- Allow parameters to be declared const; intended to protect the values pointed to by the passed-in pointers
 
 # The GoFY Programming Language
 
