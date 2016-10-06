@@ -13,7 +13,9 @@ GoFY is not different from GoLang, yet.
 - Define new keywords to [not] export a variable/function, regardless of case used for the name.
 - Allow local packages to be imported without having to use URL as needed for external packages.
 - Allow parameters to be declared const; intended to protect the values pointed to by the passed-in pointers
-- Accept backslash (\) as a line continuation character; this will allow us to place operators at the beginning of the line.
+- Accept backslash `\` as a line continuation character; this will allow us to place operators at the beginning of the line.
+
+    [This discussion](https://groups.google.com/forum/#!topic/golang-nuts/XuMrWI0Q8uk) had some similar proposals, but those proposals weren't responded to.
 
 # The GoFY Programming Language
 
