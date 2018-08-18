@@ -44,6 +44,8 @@ const (
 )
 
 const (
+	/* RBasePPC64 = 4096 */
+	/* R0=4096 ... R31=4127 */
 	REG_R0 = obj.RBasePPC64 + iota
 	REG_R1
 	REG_R2
@@ -77,6 +79,7 @@ const (
 	REG_R30
 	REG_R31
 
+	/* F0=4128 ... F31=4159 */
 	REG_F0
 	REG_F1
 	REG_F2
@@ -110,6 +113,106 @@ const (
 	REG_F30
 	REG_F31
 
+	/* V0=4160 ... V31=4191 */
+	REG_V0
+	REG_V1
+	REG_V2
+	REG_V3
+	REG_V4
+	REG_V5
+	REG_V6
+	REG_V7
+	REG_V8
+	REG_V9
+	REG_V10
+	REG_V11
+	REG_V12
+	REG_V13
+	REG_V14
+	REG_V15
+	REG_V16
+	REG_V17
+	REG_V18
+	REG_V19
+	REG_V20
+	REG_V21
+	REG_V22
+	REG_V23
+	REG_V24
+	REG_V25
+	REG_V26
+	REG_V27
+	REG_V28
+	REG_V29
+	REG_V30
+	REG_V31
+
+	/* VS0=4192 ... VS63=4255 */
+	REG_VS0
+	REG_VS1
+	REG_VS2
+	REG_VS3
+	REG_VS4
+	REG_VS5
+	REG_VS6
+	REG_VS7
+	REG_VS8
+	REG_VS9
+	REG_VS10
+	REG_VS11
+	REG_VS12
+	REG_VS13
+	REG_VS14
+	REG_VS15
+	REG_VS16
+	REG_VS17
+	REG_VS18
+	REG_VS19
+	REG_VS20
+	REG_VS21
+	REG_VS22
+	REG_VS23
+	REG_VS24
+	REG_VS25
+	REG_VS26
+	REG_VS27
+	REG_VS28
+	REG_VS29
+	REG_VS30
+	REG_VS31
+	REG_VS32
+	REG_VS33
+	REG_VS34
+	REG_VS35
+	REG_VS36
+	REG_VS37
+	REG_VS38
+	REG_VS39
+	REG_VS40
+	REG_VS41
+	REG_VS42
+	REG_VS43
+	REG_VS44
+	REG_VS45
+	REG_VS46
+	REG_VS47
+	REG_VS48
+	REG_VS49
+	REG_VS50
+	REG_VS51
+	REG_VS52
+	REG_VS53
+	REG_VS54
+	REG_VS55
+	REG_VS56
+	REG_VS57
+	REG_VS58
+	REG_VS59
+	REG_VS60
+	REG_VS61
+	REG_VS62
+	REG_VS63
+
 	REG_CR0
 	REG_CR1
 	REG_CR2
@@ -132,30 +235,48 @@ const (
 	REG_LR  = REG_SPR0 + 8
 	REG_CTR = REG_SPR0 + 9
 
-	REGZERO  = REG_R0 /* set to zero */
-	REGSP    = REG_R1
-	REGSB    = REG_R2
-	REGRET   = REG_R3
-	REGARG   = -1      /* -1 disables passing the first argument in register */
-	REGRT1   = REG_R3  /* reserved for runtime, duffzero and duffcopy */
-	REGRT2   = REG_R4  /* reserved for runtime, duffcopy */
-	REGMIN   = REG_R7  /* register variables allocated from here to REGMAX */
-	REGCTXT  = REG_R11 /* context for closures */
-	REGTLS   = REG_R13 /* C ABI TLS base pointer */
-	REGMAX   = REG_R27
-	REGEXT   = REG_R30 /* external registers allocated from here down */
-	REGG     = REG_R30 /* G */
-	REGTMP   = REG_R31 /* used by the linker */
-	FREGRET  = REG_F0
-	FREGMIN  = REG_F17 /* first register variable */
-	FREGMAX  = REG_F26 /* last register variable for 9g only */
-	FREGEXT  = REG_F26 /* first external register */
-	FREGCVI  = REG_F27 /* floating conversion constant */
-	FREGZERO = REG_F28 /* both float and double */
-	FREGHALF = REG_F29 /* double */
-	FREGONE  = REG_F30 /* double */
-	FREGTWO  = REG_F31 /* double */
+	REGZERO = REG_R0 /* set to zero */
+	REGSP   = REG_R1
+	REGSB   = REG_R2
+	REGRET  = REG_R3
+	REGARG  = -1      /* -1 disables passing the first argument in register */
+	REGRT1  = REG_R3  /* reserved for runtime, duffzero and duffcopy */
+	REGRT2  = REG_R4  /* reserved for runtime, duffcopy */
+	REGMIN  = REG_R7  /* register variables allocated from here to REGMAX */
+	REGCTXT = REG_R11 /* context for closures */
+	REGTLS  = REG_R13 /* C ABI TLS base pointer */
+	REGMAX  = REG_R27
+	REGEXT  = REG_R30 /* external registers allocated from here down */
+	REGG    = REG_R30 /* G */
+	REGTMP  = REG_R31 /* used by the linker */
+	FREGRET = REG_F0
+	FREGMIN = REG_F17 /* first register variable */
+	FREGMAX = REG_F26 /* last register variable for 9g only */
+	FREGEXT = REG_F26 /* first external register */
 )
+
+// OpenPOWER ABI for Linux Supplement Power Architecture 64-Bit ELF V2 ABI
+// https://openpowerfoundation.org/?resource_lib=64-bit-elf-v2-abi-specification-power-architecture
+var PPC64DWARFRegisters = map[int16]int16{}
+
+func init() {
+	// f assigns dwarfregister[from:to] = (base):(to-from+base)
+	f := func(from, to, base int16) {
+		for r := int16(from); r <= to; r++ {
+			PPC64DWARFRegisters[r] = r - from + base
+		}
+	}
+	f(REG_R0, REG_R31, 0)
+	f(REG_F0, REG_F31, 32)
+	f(REG_V0, REG_V31, 77)
+	f(REG_CR0, REG_CR7, 68)
+
+	f(REG_VS0, REG_VS31, 32)  // overlaps F0-F31
+	f(REG_VS32, REG_VS63, 77) // overlaps V0-V31
+	PPC64DWARFRegisters[REG_LR] = 65
+	PPC64DWARFRegisters[REG_CTR] = 66
+	PPC64DWARFRegisters[REG_XER] = 76
+}
 
 /*
  * GENERAL:
@@ -185,10 +306,58 @@ const (
 	NOSCHED = 1 << 9
 )
 
+// Values for use in branch instruction BC
+// BC B0,BI,label
+// BO is type of branch + likely bits described below
+// BI is CR value + branch type
+// ex: BEQ CR2,label is BC 12,10,label
+//   12 = BO_BCR
+//   10 = BI_CR2 + BI_EQ
+
+const (
+	BI_CR0 = 0
+	BI_CR1 = 4
+	BI_CR2 = 8
+	BI_CR3 = 12
+	BI_CR4 = 16
+	BI_CR5 = 20
+	BI_CR6 = 24
+	BI_CR7 = 28
+	BI_LT  = 0
+	BI_GT  = 1
+	BI_EQ  = 2
+	BI_OVF = 3
+)
+
+// Values for the BO field.  Add the branch type to
+// the likely bits, if a likely setting is known.
+// If branch likely or unlikely is not known, don't set it.
+// e.g. branch on cr+likely = 15
+
+const (
+	BO_BCTR     = 16 // branch on ctr value
+	BO_BCR      = 12 // branch on cr value
+	BO_BCRBCTR  = 8  // branch on ctr and cr value
+	BO_NOTBCR   = 4  // branch on not cr value
+	BO_UNLIKELY = 2  // value for unlikely
+	BO_LIKELY   = 3  // value for likely
+)
+
+// Bit settings from the CR
+
+const (
+	C_COND_LT = iota // 0 result is negative
+	C_COND_GT        // 1 result is positive
+	C_COND_EQ        // 2 result is zero
+	C_COND_SO        // 3 summary overflow or FP compare w/ NaN
+)
+
 const (
 	C_NONE = iota
 	C_REG
 	C_FREG
+	C_VREG
+	C_VSREG
 	C_CREG
 	C_SPR /* special processor register */
 	C_ZCON
@@ -210,8 +379,8 @@ const (
 	C_LAUTO
 	C_SEXT
 	C_LEXT
-	C_ZOREG
-	C_SOREG
+	C_ZOREG // conjecture: either (1) register + zeroed offset, or (2) "R0" implies zero or C_REG
+	C_SOREG // register + signed offset
 	C_LOREG
 	C_FPSCR
 	C_MSR
@@ -232,6 +401,7 @@ const (
 const (
 	AADD = obj.ABasePPC64 + obj.A_ARCHSPECIFIC + iota
 	AADDCC
+	AADDIS
 	AADDV
 	AADDVCC
 	AADDC
@@ -250,22 +420,25 @@ const (
 	AADDZECC
 	AADDZEVCC
 	AADDZEV
+	AADDEX
 	AAND
 	AANDCC
 	AANDN
 	AANDNCC
+	AANDISCC
 	ABC
 	ABCL
 	ABEQ
-	ABGE
+	ABGE // not LT = G/E/U
 	ABGT
-	ABLE
+	ABLE // not GT = L/E/U
 	ABLT
-	ABNE
-	ABVC
-	ABVS
+	ABNE // not EQ = L/G/U
+	ABVC // Unordered-clear
+	ABVS // Unordered-set
 	ACMP
 	ACMPU
+	ACMPEQB
 	ACNTLZW
 	ACNTLZWCC
 	ACRAND
@@ -315,6 +488,8 @@ const (
 	AFMOVDU
 	AFMOVS
 	AFMOVSU
+	AFMOVSX
+	AFMOVSZ
 	AFMSUB
 	AFMSUBCC
 	AFMSUBS
@@ -341,11 +516,14 @@ const (
 	AFSUBCC
 	AFSUBS
 	AFSUBSCC
+	AISEL
 	AMOVMW
 	ALBAR
+	ALHAR
 	ALSW
 	ALWAR
 	ALWSYNC
+	AMOVDBR
 	AMOVWBR
 	AMOVB
 	AMOVBU
@@ -384,6 +562,7 @@ const (
 	AORCC
 	AORN
 	AORNCC
+	AORIS
 	AREM
 	AREMCC
 	AREMV
@@ -429,6 +608,7 @@ const (
 	ASYNC
 	AXOR
 	AXORCC
+	AXORIS
 
 	ADCBF
 	ADCBI
@@ -452,9 +632,19 @@ const (
 
 	ARFCI
 
+	AFCPSGN
+	AFCPSGNCC
 	/* optional on 32-bit */
 	AFRES
 	AFRESCC
+	AFRIM
+	AFRIMCC
+	AFRIP
+	AFRIPCC
+	AFRIZ
+	AFRIZCC
+	AFRIN
+	AFRINCC
 	AFRSQRTE
 	AFRSQRTECC
 	AFSEL
@@ -470,8 +660,15 @@ const (
 	ACNTLZDCC
 	ACMPW /* CMP with L=0 */
 	ACMPWU
+	ACMPB
+	AFTDIV
+	AFTSQRT
 	ADIVD
 	ADIVDCC
+	ADIVDE
+	ADIVDECC
+	ADIVDEU
+	ADIVDEUCC
 	ADIVDVCC
 	ADIVDV
 	ADIVDU
@@ -485,6 +682,8 @@ const (
 	AFCFIDCC
 	AFCFIDU
 	AFCFIDUCC
+	AFCFIDS
+	AFCFIDSCC
 	AFCTID
 	AFCTIDCC
 	AFCTIDZ
@@ -505,12 +704,20 @@ const (
 	ARFID
 	ARLDMI
 	ARLDMICC
+	ARLDIMI
+	ARLDIMICC
 	ARLDC
 	ARLDCCC
 	ARLDCR
 	ARLDCRCC
+	ARLDICR
+	ARLDICRCC
 	ARLDCL
 	ARLDCLCC
+	ARLDICL
+	ARLDICLCC
+	AROTL
+	AROTLW
 	ASLBIA
 	ASLBIE
 	ASLBMFEE
@@ -538,6 +745,272 @@ const (
 
 	/* more 64-bit operations */
 	AHRFID
+	APOPCNTD
+	APOPCNTW
+	APOPCNTB
+	ACOPY
+	APASTECC
+	ADARN
+	ALDMX
+	AMADDHD
+	AMADDHDU
+	AMADDLD
+
+	/* Vector */
+	ALV
+	ALVEBX
+	ALVEHX
+	ALVEWX
+	ALVX
+	ALVXL
+	ALVSL
+	ALVSR
+	ASTV
+	ASTVEBX
+	ASTVEHX
+	ASTVEWX
+	ASTVX
+	ASTVXL
+	AVAND
+	AVANDC
+	AVNAND
+	AVOR
+	AVORC
+	AVNOR
+	AVXOR
+	AVEQV
+	AVADDUM
+	AVADDUBM
+	AVADDUHM
+	AVADDUWM
+	AVADDUDM
+	AVADDUQM
+	AVADDCU
+	AVADDCUQ
+	AVADDCUW
+	AVADDUS
+	AVADDUBS
+	AVADDUHS
+	AVADDUWS
+	AVADDSS
+	AVADDSBS
+	AVADDSHS
+	AVADDSWS
+	AVADDE
+	AVADDEUQM
+	AVADDECUQ
+	AVSUBUM
+	AVSUBUBM
+	AVSUBUHM
+	AVSUBUWM
+	AVSUBUDM
+	AVSUBUQM
+	AVSUBCU
+	AVSUBCUQ
+	AVSUBCUW
+	AVSUBUS
+	AVSUBUBS
+	AVSUBUHS
+	AVSUBUWS
+	AVSUBSS
+	AVSUBSBS
+	AVSUBSHS
+	AVSUBSWS
+	AVSUBE
+	AVSUBEUQM
+	AVSUBECUQ
+	AVMULESB
+	AVMULOSB
+	AVMULEUB
+	AVMULOUB
+	AVMULESH
+	AVMULOSH
+	AVMULEUH
+	AVMULOUH
+	AVMULESW
+	AVMULOSW
+	AVMULEUW
+	AVMULOUW
+	AVMULUWM
+	AVPMSUM
+	AVPMSUMB
+	AVPMSUMH
+	AVPMSUMW
+	AVPMSUMD
+	AVMSUMUDM
+	AVR
+	AVRLB
+	AVRLH
+	AVRLW
+	AVRLD
+	AVS
+	AVSLB
+	AVSLH
+	AVSLW
+	AVSL
+	AVSLO
+	AVSRB
+	AVSRH
+	AVSRW
+	AVSR
+	AVSRO
+	AVSLD
+	AVSRD
+	AVSA
+	AVSRAB
+	AVSRAH
+	AVSRAW
+	AVSRAD
+	AVSOI
+	AVSLDOI
+	AVCLZ
+	AVCLZB
+	AVCLZH
+	AVCLZW
+	AVCLZD
+	AVPOPCNT
+	AVPOPCNTB
+	AVPOPCNTH
+	AVPOPCNTW
+	AVPOPCNTD
+	AVCMPEQ
+	AVCMPEQUB
+	AVCMPEQUBCC
+	AVCMPEQUH
+	AVCMPEQUHCC
+	AVCMPEQUW
+	AVCMPEQUWCC
+	AVCMPEQUD
+	AVCMPEQUDCC
+	AVCMPGT
+	AVCMPGTUB
+	AVCMPGTUBCC
+	AVCMPGTUH
+	AVCMPGTUHCC
+	AVCMPGTUW
+	AVCMPGTUWCC
+	AVCMPGTUD
+	AVCMPGTUDCC
+	AVCMPGTSB
+	AVCMPGTSBCC
+	AVCMPGTSH
+	AVCMPGTSHCC
+	AVCMPGTSW
+	AVCMPGTSWCC
+	AVCMPGTSD
+	AVCMPGTSDCC
+	AVCMPNEZB
+	AVCMPNEZBCC
+	AVPERM
+	AVBPERMQ
+	AVBPERMD
+	AVSEL
+	AVSPLT
+	AVSPLTB
+	AVSPLTH
+	AVSPLTW
+	AVSPLTI
+	AVSPLTISB
+	AVSPLTISH
+	AVSPLTISW
+	AVCIPH
+	AVCIPHER
+	AVCIPHERLAST
+	AVNCIPH
+	AVNCIPHER
+	AVNCIPHERLAST
+	AVSBOX
+	AVSHASIGMA
+	AVSHASIGMAW
+	AVSHASIGMAD
+
+	/* VSX */
+	ALXV
+	ALXVD2X
+	ALXVDSX
+	ALXVW4X
+	ASTXV
+	ASTXVD2X
+	ASTXVW4X
+	ALXS
+	ALXSDX
+	ASTXS
+	ASTXSDX
+	ALXSI
+	ALXSIWAX
+	ALXSIWZX
+	ASTXSI
+	ASTXSIWX
+	AMFVSR
+	AMFVSRD
+	AMFFPRD
+	AMFVRD
+	AMFVSRWZ
+	AMFVSRLD
+	AMTVSR
+	AMTVSRD
+	AMTFPRD
+	AMTVRD
+	AMTVSRWA
+	AMTVSRWZ
+	AMTVSRDD
+	AMTVSRWS
+	AXXLAND
+	AXXLANDQ
+	AXXLANDC
+	AXXLEQV
+	AXXLNAND
+	AXXLOR
+	AXXLORC
+	AXXLNOR
+	AXXLORQ
+	AXXLXOR
+	AXXSEL
+	AXXMRG
+	AXXMRGHW
+	AXXMRGLW
+	AXXSPLT
+	AXXSPLTW
+	AXXPERM
+	AXXPERMDI
+	AXXSI
+	AXXSLDWI
+	AXSCV
+	AXSCVDPSP
+	AXSCVSPDP
+	AXSCVDPSPN
+	AXSCVSPDPN
+	AXVCV
+	AXVCVDPSP
+	AXVCVSPDP
+	AXSCVX
+	AXSCVDPSXDS
+	AXSCVDPSXWS
+	AXSCVDPUXDS
+	AXSCVDPUXWS
+	AXSCVXP
+	AXSCVSXDDP
+	AXSCVUXDDP
+	AXSCVSXDSP
+	AXSCVUXDSP
+	AXVCVX
+	AXVCVDPSXDS
+	AXVCVDPSXWS
+	AXVCVDPUXDS
+	AXVCVDPUXWS
+	AXVCVSPSXDS
+	AXVCVSPSXWS
+	AXVCVSPUXDS
+	AXVCVSPUXWS
+	AXVCVXP
+	AXVCVSXDDP
+	AXVCVSXWDP
+	AXVCVUXDDP
+	AXVCVUXWDP
+	AXVCVSXDSP
+	AXVCVSXWSP
+	AXVCVUXDSP
+	AXVCVUXWSP
 
 	ALAST
 

@@ -18,7 +18,9 @@ package heap
 
 import "sort"
 
-// Any type that implements heap.Interface may be used as a
+// The Interface type describes the requirements
+// for a type using the routines in this package.
+// Any type that implements it may be used as a
 // min-heap with the following invariants (established after
 // Init has been called or if the data is empty or sorted):
 //
@@ -33,11 +35,10 @@ type Interface interface {
 	Pop() interface{}   // remove and return element Len() - 1.
 }
 
-// A heap must be initialized before any of the heap operations
-// can be used. Init is idempotent with respect to the heap invariants
+// Init establishes the heap invariants required by the other routines in this package.
+// Init is idempotent with respect to the heap invariants
 // and may be called whenever the heap invariants may have been invalidated.
 // Its complexity is O(n) where n = h.Len().
-//
 func Init(h Interface) {
 	// heapify
 	n := h.Len()
@@ -72,8 +73,9 @@ func Remove(h Interface, i int) interface{} {
 	n := h.Len() - 1
 	if n != i {
 		h.Swap(i, n)
-		down(h, i, n)
-		up(h, i)
+		if !down(h, i, n) {
+			up(h, i)
+		}
 	}
 	return h.Pop()
 }
@@ -83,8 +85,9 @@ func Remove(h Interface, i int) interface{} {
 // but less expensive than, calling Remove(h, i) followed by a Push of the new value.
 // The complexity is O(log(n)) where n = h.Len().
 func Fix(h Interface, i int) {
-	down(h, i, h.Len())
-	up(h, i)
+	if !down(h, i, h.Len()) {
+		up(h, i)
+	}
 }
 
 func up(h Interface, j int) {
@@ -98,14 +101,15 @@ func up(h Interface, j int) {
 	}
 }
 
-func down(h Interface, i, n int) {
+func down(h Interface, i0, n int) bool {
+	i := i0
 	for {
 		j1 := 2*i + 1
 		if j1 >= n || j1 < 0 { // j1 < 0 after int overflow
 			break
 		}
 		j := j1 // left child
-		if j2 := j1 + 1; j2 < n && !h.Less(j1, j2) {
+		if j2 := j1 + 1; j2 < n && h.Less(j2, j1) {
 			j = j2 // = 2*i + 2  // right child
 		}
 		if !h.Less(j, i) {
@@ -114,4 +118,5 @@ func down(h Interface, i, n int) {
 		h.Swap(i, j)
 		i = j
 	}
+	return i > i0
 }

@@ -12,6 +12,8 @@
 
 package net
 
+import _ "unsafe" // for go:linkname
+
 // IP address lengths (bytes).
 const (
 	IPv4len = 4
@@ -90,7 +92,7 @@ func CIDRMask(ones, bits int) IPMask {
 
 // Well-known IPv4 addresses
 var (
-	IPv4bcast     = IPv4(255, 255, 255, 255) // broadcast
+	IPv4bcast     = IPv4(255, 255, 255, 255) // limited broadcast
 	IPv4allsys    = IPv4(224, 0, 0, 1)       // all systems
 	IPv4allrouter = IPv4(224, 0, 0, 2)       // all routers
 	IPv4zero      = IPv4(0, 0, 0, 0)         // all zeros
@@ -106,7 +108,8 @@ var (
 	IPv6linklocalallrouters    = IP{0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02}
 )
 
-// IsUnspecified reports whether ip is an unspecified address.
+// IsUnspecified reports whether ip is an unspecified address, either
+// the IPv4 address "0.0.0.0" or the IPv6 address "::".
 func (ip IP) IsUnspecified() bool {
 	return ip.Equal(IPv4zero) || ip.Equal(IPv6unspecified)
 }
@@ -153,6 +156,12 @@ func (ip IP) IsLinkLocalUnicast() bool {
 
 // IsGlobalUnicast reports whether ip is a global unicast
 // address.
+//
+// The identification of global unicast addresses uses address type
+// identification as defined in RFC 1122, RFC 4632 and RFC 4291 with
+// the exception of IPv4 directed broadcast addresses.
+// It returns true even if ip is in IPv4 private address space or
+// local IPv6 unicast address space.
 func (ip IP) IsGlobalUnicast() bool {
 	return (len(ip) == IPv4len || len(ip) == IPv6len) &&
 		!ip.Equal(IPv4bcast) &&
@@ -251,6 +260,25 @@ func (ip IP) Mask(mask IPMask) IP {
 	return out
 }
 
+// ubtoa encodes the string form of the integer v to dst[start:] and
+// returns the number of bytes written to dst. The caller must ensure
+// that dst has sufficient length.
+func ubtoa(dst []byte, start int, v byte) int {
+	if v < 10 {
+		dst[start] = v + '0'
+		return 1
+	} else if v < 100 {
+		dst[start+1] = v%10 + '0'
+		dst[start] = v/10 + '0'
+		return 2
+	}
+
+	dst[start+2] = v%10 + '0'
+	dst[start+1] = (v/10)%10 + '0'
+	dst[start] = v/100 + '0'
+	return 3
+}
+
 // String returns the string form of the IP address ip.
 // It returns one of 4 forms:
 //   - "<nil>", if ip has length 0
@@ -266,13 +294,26 @@ func (ip IP) String() string {
 
 	// If IPv4, use dotted notation.
 	if p4 := p.To4(); len(p4) == IPv4len {
-		return uitoa(uint(p4[0])) + "." +
-			uitoa(uint(p4[1])) + "." +
-			uitoa(uint(p4[2])) + "." +
-			uitoa(uint(p4[3]))
+		const maxIPv4StringLen = len("255.255.255.255")
+		b := make([]byte, maxIPv4StringLen)
+
+		n := ubtoa(b, 0, p4[0])
+		b[n] = '.'
+		n++
+
+		n += ubtoa(b, n, p4[1])
+		b[n] = '.'
+		n++
+
+		n += ubtoa(b, n, p4[2])
+		b[n] = '.'
+		n++
+
+		n += ubtoa(b, n, p4[3])
+		return string(b[:n])
 	}
 	if len(p) != IPv6len {
-		return hexString(ip)
+		return "?" + hexString(ip)
 	}
 
 	// Find longest run of zeros.
@@ -332,13 +373,14 @@ func ipEmptyString(ip IP) string {
 }
 
 // MarshalText implements the encoding.TextMarshaler interface.
-// The encoding is the same as returned by String.
+// The encoding is the same as returned by String, with one exception:
+// When len(ip) is zero, it returns an empty slice.
 func (ip IP) MarshalText() ([]byte, error) {
 	if len(ip) == 0 {
 		return []byte(""), nil
 	}
 	if len(ip) != IPv4len && len(ip) != IPv6len {
-		return nil, &AddrError{Err: "invalid IP address", Addr: ip.String()}
+		return nil, &AddrError{Err: "invalid IP address", Addr: hexString(ip)}
 	}
 	return []byte(ip.String()), nil
 }
@@ -375,17 +417,9 @@ func (ip IP) Equal(x IP) bool {
 	return false
 }
 
-func bytesEqual(x, y []byte) bool {
-	if len(x) != len(y) {
-		return false
-	}
-	for i, b := range x {
-		if y[i] != b {
-			return false
-		}
-	}
-	return true
-}
+// bytes.Equal is implemented in runtime/asm_$goarch.s
+//go:linkname bytesEqual bytes.Equal
+func bytesEqual(x, y []byte) bool
 
 func (ip IP) matchAddrFamily(x IP) bool {
 	return ip.To4() != nil && x.To4() != nil || ip.To16() != nil && ip.To4() == nil && x.To16() != nil && x.To4() == nil
@@ -504,140 +538,137 @@ func (n *IPNet) String() string {
 // Parse IPv4 address (d.d.d.d).
 func parseIPv4(s string) IP {
 	var p [IPv4len]byte
-	i := 0
-	for j := 0; j < IPv4len; j++ {
-		if i >= len(s) {
+	for i := 0; i < IPv4len; i++ {
+		if len(s) == 0 {
 			// Missing octets.
 			return nil
 		}
-		if j > 0 {
-			if s[i] != '.' {
+		if i > 0 {
+			if s[0] != '.' {
 				return nil
 			}
-			i++
+			s = s[1:]
 		}
-		var (
-			n  int
-			ok bool
-		)
-		n, i, ok = dtoi(s, i)
+		n, c, ok := dtoi(s)
 		if !ok || n > 0xFF {
 			return nil
 		}
-		p[j] = byte(n)
+		s = s[c:]
+		p[i] = byte(n)
 	}
-	if i != len(s) {
+	if len(s) != 0 {
 		return nil
 	}
 	return IPv4(p[0], p[1], p[2], p[3])
 }
 
-// parseIPv6 parses s as a literal IPv6 address described in RFC 4291
-// and RFC 5952.  It can also parse a literal scoped IPv6 address with
-// zone identifier which is described in RFC 4007 when zoneAllowed is
-// true.
-func parseIPv6(s string, zoneAllowed bool) (ip IP, zone string) {
-	ip = make(IP, IPv6len)
-	ellipsis := -1 // position of ellipsis in p
-	i := 0         // index in string s
+// parseIPv6Zone parses s as a literal IPv6 address and its associated zone
+// identifier which is described in RFC 4007.
+func parseIPv6Zone(s string) (IP, string) {
+	s, zone := splitHostZone(s)
+	return parseIPv6(s), zone
+}
 
-	if zoneAllowed {
-		s, zone = splitHostZone(s)
-	}
+// parseIPv6Zone parses s as a literal IPv6 address described in RFC 4291
+// and RFC 5952.
+func parseIPv6(s string) (ip IP) {
+	ip = make(IP, IPv6len)
+	ellipsis := -1 // position of ellipsis in ip
 
 	// Might have leading ellipsis
 	if len(s) >= 2 && s[0] == ':' && s[1] == ':' {
 		ellipsis = 0
-		i = 2
+		s = s[2:]
 		// Might be only ellipsis
-		if i == len(s) {
-			return ip, zone
+		if len(s) == 0 {
+			return ip
 		}
 	}
 
 	// Loop, parsing hex numbers followed by colon.
-	j := 0
-	for j < IPv6len {
+	i := 0
+	for i < IPv6len {
 		// Hex number.
-		n, i1, ok := xtoi(s, i)
+		n, c, ok := xtoi(s)
 		if !ok || n > 0xFFFF {
-			return nil, zone
+			return nil
 		}
 
 		// If followed by dot, might be in trailing IPv4.
-		if i1 < len(s) && s[i1] == '.' {
-			if ellipsis < 0 && j != IPv6len-IPv4len {
+		if c < len(s) && s[c] == '.' {
+			if ellipsis < 0 && i != IPv6len-IPv4len {
 				// Not the right place.
-				return nil, zone
+				return nil
 			}
-			if j+IPv4len > IPv6len {
+			if i+IPv4len > IPv6len {
 				// Not enough room.
-				return nil, zone
+				return nil
 			}
-			ip4 := parseIPv4(s[i:])
+			ip4 := parseIPv4(s)
 			if ip4 == nil {
-				return nil, zone
+				return nil
 			}
-			ip[j] = ip4[12]
-			ip[j+1] = ip4[13]
-			ip[j+2] = ip4[14]
-			ip[j+3] = ip4[15]
-			i = len(s)
-			j += IPv4len
+			ip[i] = ip4[12]
+			ip[i+1] = ip4[13]
+			ip[i+2] = ip4[14]
+			ip[i+3] = ip4[15]
+			s = ""
+			i += IPv4len
 			break
 		}
 
 		// Save this 16-bit chunk.
-		ip[j] = byte(n >> 8)
-		ip[j+1] = byte(n)
-		j += 2
+		ip[i] = byte(n >> 8)
+		ip[i+1] = byte(n)
+		i += 2
 
 		// Stop at end of string.
-		i = i1
-		if i == len(s) {
+		s = s[c:]
+		if len(s) == 0 {
 			break
 		}
 
 		// Otherwise must be followed by colon and more.
-		if s[i] != ':' || i+1 == len(s) {
-			return nil, zone
+		if s[0] != ':' || len(s) == 1 {
+			return nil
 		}
-		i++
+		s = s[1:]
 
 		// Look for ellipsis.
-		if s[i] == ':' {
+		if s[0] == ':' {
 			if ellipsis >= 0 { // already have one
-				return nil, zone
+				return nil
 			}
-			ellipsis = j
-			if i++; i == len(s) { // can be at end
+			ellipsis = i
+			s = s[1:]
+			if len(s) == 0 { // can be at end
 				break
 			}
 		}
 	}
 
 	// Must have used entire string.
-	if i != len(s) {
-		return nil, zone
+	if len(s) != 0 {
+		return nil
 	}
 
 	// If didn't parse enough, expand ellipsis.
-	if j < IPv6len {
+	if i < IPv6len {
 		if ellipsis < 0 {
-			return nil, zone
+			return nil
 		}
-		n := IPv6len - j
-		for k := j - 1; k >= ellipsis; k-- {
-			ip[k+n] = ip[k]
+		n := IPv6len - i
+		for j := i - 1; j >= ellipsis; j-- {
+			ip[j+n] = ip[j]
 		}
-		for k := ellipsis + n - 1; k >= ellipsis; k-- {
-			ip[k] = 0
+		for j := ellipsis + n - 1; j >= ellipsis; j-- {
+			ip[j] = 0
 		}
 	} else if ellipsis >= 0 {
 		// Ellipsis must represent at least one 0 group.
-		return nil, zone
+		return nil
 	}
-	return ip, zone
+	return ip
 }
 
 // ParseIP parses s as an IP address, returning the result.
@@ -651,20 +682,34 @@ func ParseIP(s string) IP {
 		case '.':
 			return parseIPv4(s)
 		case ':':
-			ip, _ := parseIPv6(s, false)
-			return ip
+			return parseIPv6(s)
 		}
 	}
 	return nil
 }
 
-// ParseCIDR parses s as a CIDR notation IP address and mask,
+// parseIPZone parses s as an IP address, return it and its associated zone
+// identifier (IPv6 only).
+func parseIPZone(s string) (IP, string) {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '.':
+			return parseIPv4(s), ""
+		case ':':
+			return parseIPv6Zone(s)
+		}
+	}
+	return nil, ""
+}
+
+// ParseCIDR parses s as a CIDR notation IP address and prefix length,
 // like "192.0.2.0/24" or "2001:db8::/32", as defined in
 // RFC 4632 and RFC 4291.
 //
-// It returns the IP address and the network implied by the IP
-// and mask. For example, ParseCIDR("198.51.100.1/24") returns
-// the IP address 198.51.100.1 and the network 198.51.100.0/24.
+// It returns the IP address and the network implied by the IP and
+// prefix length.
+// For example, ParseCIDR("192.0.2.1/24") returns the IP address
+// 192.0.2.1 and the network 192.0.2.0/24.
 func ParseCIDR(s string) (IP, *IPNet, error) {
 	i := byteIndex(s, '/')
 	if i < 0 {
@@ -675,9 +720,9 @@ func ParseCIDR(s string) (IP, *IPNet, error) {
 	ip := parseIPv4(addr)
 	if ip == nil {
 		iplen = IPv6len
-		ip, _ = parseIPv6(addr, false)
+		ip = parseIPv6(addr)
 	}
-	n, i, ok := dtoi(mask, 0)
+	n, i, ok := dtoi(mask)
 	if ip == nil || !ok || i != len(mask) || n < 0 || n > 8*iplen {
 		return nil, nil, &ParseError{Type: "CIDR address", Text: s}
 	}

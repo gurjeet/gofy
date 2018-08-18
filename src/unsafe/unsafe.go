@@ -76,8 +76,10 @@ type ArbitraryType int
 //	// equivalent to e := unsafe.Pointer(&x[i])
 //	e := unsafe.Pointer(uintptr(unsafe.Pointer(&x[0])) + i*unsafe.Sizeof(x[0]))
 //
-// It is valid both to add and to subtract offsets from a pointer in this way,
-// but the result must continue to point into the original allocated object.
+// It is valid both to add and to subtract offsets from a pointer in this way.
+// It is also valid to use &^ to round pointers, usually for alignment.
+// In all cases, the result must continue to point into the original allocated object.
+//
 // Unlike in C, it is not valid to advance a pointer just beyond the end of
 // its original allocation:
 //
@@ -153,10 +155,10 @@ type ArbitraryType int
 //	var s string
 //	hdr := (*reflect.StringHeader)(unsafe.Pointer(&s)) // case 1
 //	hdr.Data = uintptr(unsafe.Pointer(p))              // case 6 (this case)
-//	hdr.Len = uintptr(n)
+//	hdr.Len = n
 //
 // In this usage hdr.Data is really an alternate way to refer to the underlying
-// pointer in the slice header, not a uintptr variable itself.
+// pointer in the string header, not a uintptr variable itself.
 //
 // In general, reflect.SliceHeader and reflect.StringHeader should be used
 // only as *reflect.SliceHeader and *reflect.StringHeader pointing at actual
@@ -166,7 +168,7 @@ type ArbitraryType int
 //	// INVALID: a directly-declared header will not hold Data as a reference.
 //	var hdr reflect.StringHeader
 //	hdr.Data = uintptr(unsafe.Pointer(p))
-//	hdr.Len = uintptr(n)
+//	hdr.Len = n
 //	s := *(*string)(unsafe.Pointer(&hdr)) // p possibly already lost
 //
 type Pointer *ArbitraryType
@@ -174,7 +176,7 @@ type Pointer *ArbitraryType
 // Sizeof takes an expression x of any type and returns the size in bytes
 // of a hypothetical variable v as if v was declared via var v = x.
 // The size does not include any memory possibly referenced by x.
-// For instance, if x is a slice,  Sizeof returns the size of the slice
+// For instance, if x is a slice, Sizeof returns the size of the slice
 // descriptor, not the size of the memory referenced by the slice.
 func Sizeof(x ArbitraryType) uintptr
 

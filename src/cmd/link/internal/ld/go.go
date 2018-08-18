@@ -9,7 +9,9 @@ package ld
 import (
 	"bytes"
 	"cmd/internal/bio"
-	"cmd/internal/obj"
+	"cmd/internal/objabi"
+	"cmd/link/internal/sym"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -28,31 +30,23 @@ func expandpkg(t0 string, pkg string) string {
 //	once the dust settles, try to move some code to
 //		libmach, so that other linkers and ar can share.
 
-func ldpkg(f *bio.Reader, pkg string, length int64, filename string, whence int) {
-	var p0, p1 int
-
-	if Debug['g'] != 0 {
+func ldpkg(ctxt *Link, f *bio.Reader, lib *sym.Library, length int64, filename string) {
+	if *flagG {
 		return
 	}
 
 	if int64(int(length)) != length {
 		fmt.Fprintf(os.Stderr, "%s: too much pkg data in %s\n", os.Args[0], filename)
-		if Debug['u'] != 0 {
+		if *flagU {
 			errorexit()
 		}
 		return
 	}
 
-	// In a __.PKGDEF, we only care about the package name.
-	// Don't read all the export data.
-	if length > 1000 && whence == Pkgdef {
-		length = 1000
-	}
-
 	bdata := make([]byte, length)
 	if _, err := io.ReadFull(f, bdata); err != nil {
 		fmt.Fprintf(os.Stderr, "%s: short pkg read %s\n", os.Args[0], filename)
-		if Debug['u'] != 0 {
+		if *flagU {
 			errorexit()
 		}
 		return
@@ -60,8 +54,6 @@ func ldpkg(f *bio.Reader, pkg string, length int64, filename string, whence int)
 	data := string(bdata)
 
 	// process header lines
-	isSafe := false
-	isMain := false
 	for data != "" {
 		var line string
 		if i := strings.Index(data, "\n"); i >= 0 {
@@ -70,38 +62,25 @@ func ldpkg(f *bio.Reader, pkg string, length int64, filename string, whence int)
 			line, data = data, ""
 		}
 		if line == "safe" {
-			isSafe = true
+			lib.Safe = true
 		}
 		if line == "main" {
-			isMain = true
+			lib.Main = true
 		}
 		if line == "" {
 			break
 		}
 	}
 
-	if whence == Pkgdef || whence == FileObj {
-		if pkg == "main" && !isMain {
-			Exitf("%s: not package main", filename)
-		}
-		if Debug['u'] != 0 && whence != ArchiveObj && !isSafe {
-			Exitf("load of unsafe package %s", filename)
-		}
-	}
-
-	// __.PKGDEF has no cgo section - those are in the C compiler-generated object files.
-	if whence == Pkgdef {
-		return
-	}
-
 	// look for cgo section
-	p0 = strings.Index(data, "\n$$  // cgo")
+	p0 := strings.Index(data, "\n$$  // cgo")
+	var p1 int
 	if p0 >= 0 {
 		p0 += p1
 		i := strings.IndexByte(data[p0+1:], '\n')
 		if i < 0 {
 			fmt.Fprintf(os.Stderr, "%s: found $$ // cgo but no newline in %s\n", os.Args[0], filename)
-			if Debug['u'] != 0 {
+			if *flagU {
 				errorexit()
 			}
 			return
@@ -114,56 +93,43 @@ func ldpkg(f *bio.Reader, pkg string, length int64, filename string, whence int)
 		}
 		if p1 < 0 {
 			fmt.Fprintf(os.Stderr, "%s: cannot find end of // cgo section in %s\n", os.Args[0], filename)
-			if Debug['u'] != 0 {
+			if *flagU {
 				errorexit()
 			}
 			return
 		}
 		p1 += p0
 
-		loadcgo(filename, pkg, data[p0:p1])
+		loadcgo(ctxt, filename, objabi.PathToPrefix(lib.Pkg), data[p0:p1])
 	}
 }
 
-func loadcgo(file string, pkg string, p string) {
-	var next string
-	var q string
-	var f []string
-	var local string
-	var remote string
-	var lib string
-	var s *LSym
+func loadcgo(ctxt *Link, file string, pkg string, p string) {
+	var directives [][]string
+	if err := json.NewDecoder(strings.NewReader(p)).Decode(&directives); err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %s: failed decoding cgo directives: %v\n", os.Args[0], file, err)
+		nerrors++
+		return
+	}
 
-	p0 := ""
-	for ; p != ""; p = next {
-		if i := strings.Index(p, "\n"); i >= 0 {
-			p, next = p[:i], p[i+1:]
-		} else {
-			next = ""
-		}
-
-		p0 = p // save for error message
-		f = tokenize(p)
-		if len(f) == 0 {
-			continue
-		}
-
-		if f[0] == "cgo_import_dynamic" {
+	for _, f := range directives {
+		switch f[0] {
+		case "cgo_import_dynamic":
 			if len(f) < 2 || len(f) > 4 {
-				goto err
+				break
 			}
 
-			local = f[1]
-			remote = local
+			local := f[1]
+			remote := local
 			if len(f) > 2 {
 				remote = f[2]
 			}
-			lib = ""
+			lib := ""
 			if len(f) > 3 {
 				lib = f[3]
 			}
 
-			if Debug['d'] != 0 {
+			if *FlagD {
 				fmt.Fprintf(os.Stderr, "%s: %s: cannot use dynamic imports with -d flag\n", os.Args[0], file)
 				nerrors++
 				return
@@ -174,8 +140,8 @@ func loadcgo(file string, pkg string, p string) {
 				// to force a link of foo.so.
 				havedynamic = 1
 
-				if HEADTYPE == obj.Hdarwin {
-					Machoadddynlib(lib)
+				if ctxt.HeadType == objabi.Hdarwin {
+					machoadddynlib(lib, ctxt.LinkMode)
 				} else {
 					dynlib = append(dynlib, lib)
 				}
@@ -183,63 +149,58 @@ func loadcgo(file string, pkg string, p string) {
 			}
 
 			local = expandpkg(local, pkg)
-			q = ""
+			q := ""
 			if i := strings.Index(remote, "#"); i >= 0 {
 				remote, q = remote[:i], remote[i+1:]
 			}
-			s = Linklookup(Ctxt, local, 0)
-			if local != f[1] {
-			}
-			if s.Type == 0 || s.Type == obj.SXREF || s.Type == obj.SHOSTOBJ {
-				s.Dynimplib = lib
+			s := ctxt.Syms.Lookup(local, 0)
+			if s.Type == 0 || s.Type == sym.SXREF || s.Type == sym.SHOSTOBJ {
+				s.SetDynimplib(lib)
 				s.Extname = remote
-				s.Dynimpvers = q
-				if s.Type != obj.SHOSTOBJ {
-					s.Type = obj.SDYNIMPORT
+				s.SetDynimpvers(q)
+				if s.Type != sym.SHOSTOBJ {
+					s.Type = sym.SDYNIMPORT
 				}
 				havedynamic = 1
 			}
-
 			continue
-		}
 
-		if f[0] == "cgo_import_static" {
+		case "cgo_import_static":
 			if len(f) != 2 {
-				goto err
+				break
 			}
-			local = f[1]
-			s = Linklookup(Ctxt, local, 0)
-			s.Type = obj.SHOSTOBJ
+			local := f[1]
+
+			s := ctxt.Syms.Lookup(local, 0)
+			s.Type = sym.SHOSTOBJ
 			s.Size = 0
 			continue
-		}
 
-		if f[0] == "cgo_export_static" || f[0] == "cgo_export_dynamic" {
+		case "cgo_export_static", "cgo_export_dynamic":
 			if len(f) < 2 || len(f) > 3 {
-				goto err
+				break
 			}
-			local = f[1]
+			local := f[1]
+			remote := local
 			if len(f) > 2 {
 				remote = f[2]
-			} else {
-				remote = local
 			}
 			local = expandpkg(local, pkg)
-			s = Linklookup(Ctxt, local, 0)
 
-			switch Buildmode {
-			case BuildmodeCShared, BuildmodeCArchive:
-				if s == Linklookup(Ctxt, "main", 0) {
+			s := ctxt.Syms.Lookup(local, 0)
+
+			switch ctxt.BuildMode {
+			case BuildModeCShared, BuildModeCArchive, BuildModePlugin:
+				if s == ctxt.Syms.Lookup("main", 0) {
 					continue
 				}
 			}
 
 			// export overrides import, for openbsd/cgo.
 			// see issue 4878.
-			if s.Dynimplib != "" {
-				s.Dynimplib = ""
+			if s.Dynimplib() != "" {
+				s.ResetDyninfo()
 				s.Extname = ""
-				s.Dynimpvers = ""
 				s.Type = 0
 			}
 
@@ -253,21 +214,18 @@ func loadcgo(file string, pkg string, p string) {
 			}
 
 			if f[0] == "cgo_export_static" {
-				s.Attr |= AttrCgoExportStatic
+				s.Attr |= sym.AttrCgoExportStatic
 			} else {
-				s.Attr |= AttrCgoExportDynamic
-			}
-			if local != f[1] {
+				s.Attr |= sym.AttrCgoExportDynamic
 			}
 			continue
-		}
 
-		if f[0] == "cgo_dynamic_linker" {
+		case "cgo_dynamic_linker":
 			if len(f) != 2 {
-				goto err
+				break
 			}
 
-			if Debug['I'] == 0 {
+			if *flagInterpreter == "" {
 				if interpreter != "" && interpreter != f[1] {
 					fmt.Fprintf(os.Stderr, "%s: conflict dynlinker: %s and %s\n", os.Args[0], interpreter, f[1])
 					nerrors++
@@ -276,102 +234,98 @@ func loadcgo(file string, pkg string, p string) {
 
 				interpreter = f[1]
 			}
-
 			continue
-		}
 
-		if f[0] == "cgo_ldflag" {
+		case "cgo_ldflag":
 			if len(f) != 2 {
-				goto err
+				break
 			}
 			ldflag = append(ldflag, f[1])
 			continue
 		}
+
+		fmt.Fprintf(os.Stderr, "%s: %s: invalid cgo directive: %q\n", os.Args[0], file, f)
+		nerrors++
 	}
-
-	return
-
-err:
-	fmt.Fprintf(os.Stderr, "%s: %s: invalid dynimport line: %s\n", os.Args[0], file, p0)
-	nerrors++
 }
 
 var seenlib = make(map[string]bool)
 
-func adddynlib(lib string) {
-	if seenlib[lib] || Linkmode == LinkExternal {
+func adddynlib(ctxt *Link, lib string) {
+	if seenlib[lib] || ctxt.LinkMode == LinkExternal {
 		return
 	}
 	seenlib[lib] = true
 
-	if Iself {
-		s := Linklookup(Ctxt, ".dynstr", 0)
+	if ctxt.IsELF {
+		s := ctxt.Syms.Lookup(".dynstr", 0)
 		if s.Size == 0 {
 			Addstring(s, "")
 		}
-		Elfwritedynent(Linklookup(Ctxt, ".dynamic", 0), DT_NEEDED, uint64(Addstring(s, lib)))
+		Elfwritedynent(ctxt, ctxt.Syms.Lookup(".dynamic", 0), DT_NEEDED, uint64(Addstring(s, lib)))
 	} else {
-		Diag("adddynlib: unsupported binary format")
+		Errorf(nil, "adddynlib: unsupported binary format")
 	}
 }
 
-func Adddynsym(ctxt *Link, s *LSym) {
-	if s.Dynid >= 0 || Linkmode == LinkExternal {
+func Adddynsym(ctxt *Link, s *sym.Symbol) {
+	if s.Dynid >= 0 || ctxt.LinkMode == LinkExternal {
 		return
 	}
 
-	if Iself {
-		Elfadddynsym(ctxt, s)
-	} else if HEADTYPE == obj.Hdarwin {
-		Diag("adddynsym: missed symbol %s (%s)", s.Name, s.Extname)
-	} else if HEADTYPE == obj.Hwindows {
+	if ctxt.IsELF {
+		elfadddynsym(ctxt, s)
+	} else if ctxt.HeadType == objabi.Hdarwin {
+		Errorf(s, "adddynsym: missed symbol (Extname=%s)", s.Extname)
+	} else if ctxt.HeadType == objabi.Hwindows {
 		// already taken care of
 	} else {
-		Diag("adddynsym: unsupported binary format")
+		Errorf(s, "adddynsym: unsupported binary format")
 	}
 }
 
 func fieldtrack(ctxt *Link) {
 	// record field tracking references
 	var buf bytes.Buffer
-	for _, s := range ctxt.Allsym {
+	for _, s := range ctxt.Syms.Allsym {
 		if strings.HasPrefix(s.Name, "go.track.") {
-			s.Attr |= AttrSpecial // do not lay out in data segment
-			s.Attr |= AttrHidden
+			s.Attr |= sym.AttrSpecial // do not lay out in data segment
+			s.Attr |= sym.AttrNotInSymbolTable
 			if s.Attr.Reachable() {
 				buf.WriteString(s.Name[9:])
-				for p := s.Reachparent; p != nil; p = p.Reachparent {
+				for p := ctxt.Reachparent[s]; p != nil; p = ctxt.Reachparent[p] {
 					buf.WriteString("\t")
 					buf.WriteString(p.Name)
 				}
 				buf.WriteString("\n")
 			}
 
-			s.Type = obj.SCONST
+			s.Type = sym.SCONST
 			s.Value = 0
 		}
 	}
 
-	if tracksym == "" {
+	if *flagFieldTrack == "" {
 		return
 	}
-	s := Linklookup(ctxt, tracksym, 0)
-	if !s.Attr.Reachable() {
+	s := ctxt.Syms.ROLookup(*flagFieldTrack, 0)
+	if s == nil || !s.Attr.Reachable() {
 		return
 	}
-	addstrdata(tracksym, buf.String())
+	s.Type = sym.SDATA
+	addstrdata(ctxt, *flagFieldTrack, buf.String())
 }
 
-func addexport() {
-	if HEADTYPE == obj.Hdarwin {
+func (ctxt *Link) addexport() {
+	if ctxt.HeadType == objabi.Hdarwin {
 		return
 	}
 
 	for _, exp := range dynexp {
-		Adddynsym(Ctxt, exp)
+		Adddynsym(ctxt, exp)
 	}
 	for _, lib := range dynlib {
-		adddynlib(lib)
+		adddynlib(ctxt, lib)
 	}
 }
 
@@ -417,17 +371,5 @@ func (p *Pkg) cycle() *Pkg {
 func importcycles() {
 	for _, p := range pkgall {
 		p.cycle()
-	}
-}
-
-func setlinkmode(arg string) {
-	if arg == "internal" {
-		Linkmode = LinkInternal
-	} else if arg == "external" {
-		Linkmode = LinkExternal
-	} else if arg == "auto" {
-		Linkmode = LinkAuto
-	} else {
-		Exitf("unknown link mode -linkmode %s", arg)
 	}
 }

@@ -1,6 +1,6 @@
 // Derived from Inferno utils/6l/obj.c and utils/6l/span.c
-// http://code.google.com/p/inferno-os/source/browse/utils/6l/obj.c
-// http://code.google.com/p/inferno-os/source/browse/utils/6l/span.c
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/6l/obj.c
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/6l/span.c
 //
 //	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
 //	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
@@ -32,59 +32,41 @@
 package ld
 
 import (
-	"cmd/internal/obj"
+	"cmd/internal/objabi"
 	"cmd/internal/sys"
+	"cmd/link/internal/sym"
 	"log"
-	"strconv"
 )
-
-var headers = []struct {
-	name string
-	val  int
-}{
-	{"darwin", obj.Hdarwin},
-	{"dragonfly", obj.Hdragonfly},
-	{"freebsd", obj.Hfreebsd},
-	{"linux", obj.Hlinux},
-	{"android", obj.Hlinux}, // must be after "linux" entry or else headstr(Hlinux) == "android"
-	{"nacl", obj.Hnacl},
-	{"netbsd", obj.Hnetbsd},
-	{"openbsd", obj.Hopenbsd},
-	{"plan9", obj.Hplan9},
-	{"solaris", obj.Hsolaris},
-	{"windows", obj.Hwindows},
-	{"windowsgui", obj.Hwindows},
-}
 
 func linknew(arch *sys.Arch) *Link {
 	ctxt := &Link{
-		Hash: []map[string]*LSym{
-			// preallocate about 2mb for hash of
-			// non static symbols
-			make(map[string]*LSym, 100000),
-		},
-		Allsym: make([]*LSym, 0, 100000),
-		Arch:   arch,
-		Goroot: obj.Getgoroot(),
+		Syms:         sym.NewSymbols(),
+		Out:          &OutBuf{arch: arch},
+		Arch:         arch,
+		LibraryByPkg: make(map[string]*sym.Library),
 	}
 
-	p := obj.Getgoarch()
-	if p != arch.Name {
-		log.Fatalf("invalid goarch %s (want %s)", p, arch.Name)
+	if objabi.GOARCH != arch.Name {
+		log.Fatalf("invalid objabi.GOARCH %s (want %s)", objabi.GOARCH, arch.Name)
 	}
 
-	ctxt.Headtype = headtype(obj.Getgoos())
-	if ctxt.Headtype < 0 {
-		log.Fatalf("unknown goos %s", obj.Getgoos())
-	}
+	AtExit(func() {
+		if nerrors > 0 && ctxt.Out.f != nil {
+			ctxt.Out.f.Close()
+			mayberemoveoutfile()
+		}
+	})
 
-	// Record thread-local storage offset.
-	// TODO(rsc): Move tlsoffset back into the linker.
-	switch ctxt.Headtype {
+	return ctxt
+}
+
+// computeTLSOffset records the thread-local storage offset.
+func (ctxt *Link) computeTLSOffset() {
+	switch ctxt.HeadType {
 	default:
-		log.Fatalf("unknown thread-local storage offset for %s", Headstr(ctxt.Headtype))
+		log.Fatalf("unknown thread-local storage offset for %v", ctxt.HeadType)
 
-	case obj.Hplan9, obj.Hwindows:
+	case objabi.Hplan9, objabi.Hwindows, objabi.Hjs:
 		break
 
 		/*
@@ -92,13 +74,13 @@ func linknew(arch *sys.Arch) *Link {
 		 * Translate 0(FS) and 8(FS) into -16(FS) and -8(FS).
 		 * Known to low-level assembly in package runtime and runtime/cgo.
 		 */
-	case obj.Hlinux,
-		obj.Hfreebsd,
-		obj.Hnetbsd,
-		obj.Hopenbsd,
-		obj.Hdragonfly,
-		obj.Hsolaris:
-		if obj.Getgoos() == "android" {
+	case objabi.Hlinux,
+		objabi.Hfreebsd,
+		objabi.Hnetbsd,
+		objabi.Hopenbsd,
+		objabi.Hdragonfly,
+		objabi.Hsolaris:
+		if objabi.GOOS == "android" {
 			switch ctxt.Arch.Family {
 			case sys.AMD64:
 				// Android/amd64 constant - offset from 0(FS) to our TLS slot.
@@ -114,7 +96,7 @@ func linknew(arch *sys.Arch) *Link {
 			ctxt.Tlsoffset = -1 * ctxt.Arch.PtrSize
 		}
 
-	case obj.Hnacl:
+	case objabi.Hnacl:
 		switch ctxt.Arch.Family {
 		default:
 			log.Fatalf("unknown thread-local storage offset for nacl/%s", ctxt.Arch.Name)
@@ -131,84 +113,31 @@ func linknew(arch *sys.Arch) *Link {
 
 		/*
 		 * OS X system constants - offset from 0(GS) to our TLS.
-		 * Explained in src/runtime/cgo/gcc_darwin_*.c.
 		 */
-	case obj.Hdarwin:
+	case objabi.Hdarwin:
 		switch ctxt.Arch.Family {
 		default:
 			log.Fatalf("unknown thread-local storage offset for darwin/%s", ctxt.Arch.Name)
 
+			/*
+			 * For x86, Apple has reserved a slot in the TLS for Go. See issue 23617.
+			 * That slot is at offset 0x30 on amd64, and 0x18 on 386.
+			 * The slot will hold the G pointer.
+			 * These constants should match those in runtime/sys_darwin_{386,amd64}.s
+			 * and runtime/cgo/gcc_darwin_{386,amd64}.c.
+			 */
+		case sys.I386:
+			ctxt.Tlsoffset = 0x18
+
+		case sys.AMD64:
+			ctxt.Tlsoffset = 0x30
+
 		case sys.ARM:
 			ctxt.Tlsoffset = 0 // dummy value, not needed
 
-		case sys.AMD64:
-			ctxt.Tlsoffset = 0x8a0
-
 		case sys.ARM64:
 			ctxt.Tlsoffset = 0 // dummy value, not needed
-
-		case sys.I386:
-			ctxt.Tlsoffset = 0x468
 		}
 	}
 
-	// On arm, record goarm.
-	if ctxt.Arch.Family == sys.ARM {
-		ctxt.Goarm = obj.Getgoarm()
-	}
-
-	return ctxt
-}
-
-func linknewsym(ctxt *Link, name string, v int) *LSym {
-	batch := ctxt.LSymBatch
-	if len(batch) == 0 {
-		batch = make([]LSym, 1000)
-	}
-	s := &batch[0]
-	ctxt.LSymBatch = batch[1:]
-
-	s.Dynid = -1
-	s.Plt = -1
-	s.Got = -1
-	s.Name = name
-	s.Version = int16(v)
-	ctxt.Allsym = append(ctxt.Allsym, s)
-
-	return s
-}
-
-func Linklookup(ctxt *Link, name string, v int) *LSym {
-	m := ctxt.Hash[v]
-	s := m[name]
-	if s != nil {
-		return s
-	}
-	s = linknewsym(ctxt, name, v)
-	s.Extname = s.Name
-	m[name] = s
-	return s
-}
-
-// read-only lookup
-func Linkrlookup(ctxt *Link, name string, v int) *LSym {
-	return ctxt.Hash[v][name]
-}
-
-func Headstr(v int) string {
-	for i := 0; i < len(headers); i++ {
-		if v == headers[i].val {
-			return headers[i].name
-		}
-	}
-	return strconv.Itoa(v)
-}
-
-func headtype(name string) int {
-	for i := 0; i < len(headers); i++ {
-		if name == headers[i].name {
-			return headers[i].val
-		}
-	}
-	return -1
 }

@@ -112,12 +112,12 @@ typedef struct {} ptracePer;
 // The real epoll_event is a union, and godefs doesn't handle it well.
 struct my_epoll_event {
 	uint32_t events;
-#ifdef __ARM_EABI__
+#if defined(__ARM_EABI__) || (defined(__mips__) && _MIPS_SIM == _ABIO32)
 	// padding is not specified in linux/eventpoll.h but added to conform to the
 	// alignment requirements of EABI
 	int32_t padFd;
 #endif
-#ifdef  __powerpc64__
+#if defined(__powerpc64__) || defined(__s390x__)
 	int32_t _padFd;
 #endif
 	int32_t fd;
@@ -405,6 +405,7 @@ const (
 	_AT_FDCWD            = C.AT_FDCWD
 	_AT_REMOVEDIR        = C.AT_REMOVEDIR
 	_AT_SYMLINK_NOFOLLOW = C.AT_SYMLINK_NOFOLLOW
+	_AT_EACCESS          = C.AT_EACCESS
 )
 
 // Terminal handling

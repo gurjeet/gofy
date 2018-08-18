@@ -14,7 +14,7 @@ var (
 	procGetSystemInfo = modkernel32.NewProc("GetSystemInfo")
 )
 
-// see http://msdn.microsoft.com/en-us/library/windows/desktop/ms724958(v=vs.85).aspx
+// see https://msdn.microsoft.com/en-us/library/windows/desktop/ms724958(v=vs.85).aspx
 type systeminfo struct {
 	wProcessorArchitecture      uint16
 	wReserved                   uint16
@@ -44,6 +44,6 @@ func sysinit() {
 	case PROCESSOR_ARCHITECTURE_INTEL:
 		gohostarch = "386"
 	default:
-		fatal("unknown processor architecture")
+		fatalf("unknown processor architecture")
 	}
 }

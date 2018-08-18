@@ -52,18 +52,6 @@ func _cgo_panic(a unsafe.Pointer, n int32) {
 var x_cgo_init byte
 var _cgo_init = &x_cgo_init
 
-//go:cgo_import_static x_cgo_malloc
-//go:linkname x_cgo_malloc x_cgo_malloc
-//go:linkname _cgo_malloc _cgo_malloc
-var x_cgo_malloc byte
-var _cgo_malloc = &x_cgo_malloc
-
-//go:cgo_import_static x_cgo_free
-//go:linkname x_cgo_free x_cgo_free
-//go:linkname _cgo_free _cgo_free
-var x_cgo_free byte
-var _cgo_free = &x_cgo_free
-
 //go:cgo_import_static x_cgo_thread_start
 //go:linkname x_cgo_thread_start x_cgo_thread_start
 //go:linkname _cgo_thread_start _cgo_thread_start
@@ -103,6 +91,16 @@ var _cgo_notify_runtime_init_done = &x_cgo_notify_runtime_init_done
 //go:linkname _cgo_set_context_function _cgo_set_context_function
 var x_cgo_set_context_function byte
 var _cgo_set_context_function = &x_cgo_set_context_function
+
+// Calls a libc function to execute background work injected via libc
+// interceptors, such as processing pending signals under the thread
+// sanitizer.
+//
+// Left as a nil pointer if no libc interceptors are expected.
+
+//go:cgo_import_static _cgo_yield
+//go:linkname _cgo_yield _cgo_yield
+var _cgo_yield unsafe.Pointer
 
 //go:cgo_export_static _cgo_topofstack
 //go:cgo_export_dynamic _cgo_topofstack

@@ -44,6 +44,9 @@ func TestEncoder(t *testing.T) {
 	for i := 0; i <= len(streamTest); i++ {
 		var buf bytes.Buffer
 		enc := NewEncoder(&buf)
+		// Check that enc.SetIndent("", "") turns off indentation.
+		enc.SetIndent(">", ".")
+		enc.SetIndent("", "")
 		for j, v := range streamTest[0:i] {
 			if err := enc.Encode(v); err != nil {
 				t.Fatalf("encode #%d: %v", j, err)
@@ -77,7 +80,7 @@ false
 func TestEncoderIndent(t *testing.T) {
 	var buf bytes.Buffer
 	enc := NewEncoder(&buf)
-	enc.Indent(">", ".")
+	enc.SetIndent(">", ".")
 	for _, v := range streamTest {
 		enc.Encode(v)
 	}
@@ -87,7 +90,7 @@ func TestEncoderIndent(t *testing.T) {
 	}
 }
 
-func TestEncoderDisableHTMLEscaping(t *testing.T) {
+func TestEncoderSetEscapeHTML(t *testing.T) {
 	var c C
 	var ct CText
 	for _, tt := range []struct {
@@ -109,12 +112,12 @@ func TestEncoderDisableHTMLEscaping(t *testing.T) {
 			t.Errorf("Encode(%s) = %#q, want %#q", tt.name, got, tt.wantEscape)
 		}
 		buf.Reset()
-		enc.DisableHTMLEscaping()
+		enc.SetEscapeHTML(false)
 		if err := enc.Encode(tt.v); err != nil {
-			t.Fatalf("DisableHTMLEscaping Encode(%s): %s", tt.name, err)
+			t.Fatalf("SetEscapeHTML(false) Encode(%s): %s", tt.name, err)
 		}
 		if got := strings.TrimSpace(buf.String()); got != tt.want {
-			t.Errorf("DisableHTMLEscaping Encode(%s) = %#q, want %#q",
+			t.Errorf("SetEscapeHTML(false) Encode(%s) = %#q, want %#q",
 				tt.name, got, tt.want)
 		}
 	}
@@ -265,11 +268,13 @@ func BenchmarkEncoderEncode(b *testing.B) {
 		X, Y string
 	}
 	v := &T{"foo", "bar"}
-	for i := 0; i < b.N; i++ {
-		if err := NewEncoder(ioutil.Discard).Encode(v); err != nil {
-			b.Fatal(err)
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if err := NewEncoder(ioutil.Discard).Encode(v); err != nil {
+				b.Fatal(err)
+			}
 		}
-	}
+	})
 }
 
 type tokenStreamCase struct {
@@ -337,11 +342,18 @@ var tokenStreamCases []tokenStreamCase = []tokenStreamCase{
 	{json: ` [{"a": 1} {"a": 2}] `, expTokens: []interface{}{
 		Delim('['),
 		decodeThis{map[string]interface{}{"a": float64(1)}},
-		decodeThis{&SyntaxError{"expected comma after array element", 0}},
+		decodeThis{&SyntaxError{"expected comma after array element", 11}},
 	}},
-	{json: `{ "a" 1 }`, expTokens: []interface{}{
-		Delim('{'), "a",
-		decodeThis{&SyntaxError{"expected colon after object key", 0}},
+	{json: `{ "` + strings.Repeat("a", 513) + `" 1 }`, expTokens: []interface{}{
+		Delim('{'), strings.Repeat("a", 513),
+		decodeThis{&SyntaxError{"expected colon after object key", 518}},
+	}},
+	{json: `{ "\a" }`, expTokens: []interface{}{
+		Delim('{'),
+		&SyntaxError{"invalid character 'a' in string escape code", 3},
+	}},
+	{json: ` \a`, expTokens: []interface{}{
+		&SyntaxError{"invalid character '\\\\' looking for beginning of value", 1},
 	}},
 }
 
@@ -362,15 +374,15 @@ func TestDecodeInStream(t *testing.T) {
 				tk, err = dec.Token()
 			}
 			if experr, ok := etk.(error); ok {
-				if err == nil || err.Error() != experr.Error() {
-					t.Errorf("case %v: Expected error %v in %q, but was %v", ci, experr, tcase.json, err)
+				if err == nil || !reflect.DeepEqual(err, experr) {
+					t.Errorf("case %v: Expected error %#v in %q, but was %#v", ci, experr, tcase.json, err)
 				}
 				break
 			} else if err == io.EOF {
 				t.Errorf("case %v: Unexpected EOF in %q", ci, tcase.json)
 				break
 			} else if err != nil {
-				t.Errorf("case %v: Unexpected error '%v' in %q", ci, err, tcase.json)
+				t.Errorf("case %v: Unexpected error '%#v' in %q", ci, err, tcase.json)
 				break
 			}
 			if !reflect.DeepEqual(tk, etk) {

@@ -54,30 +54,26 @@ var offsetExtraBits = []int8{
 	0, 0, 0, 0, 1, 1, 2, 2, 3, 3,
 	4, 4, 5, 5, 6, 6, 7, 7, 8, 8,
 	9, 9, 10, 10, 11, 11, 12, 12, 13, 13,
-	/* extended window */
-	14, 14, 15, 15, 16, 16, 17, 17, 18, 18, 19, 19, 20, 20,
 }
 
 var offsetBase = []uint32{
-	/* normal deflate */
 	0x000000, 0x000001, 0x000002, 0x000003, 0x000004,
 	0x000006, 0x000008, 0x00000c, 0x000010, 0x000018,
 	0x000020, 0x000030, 0x000040, 0x000060, 0x000080,
 	0x0000c0, 0x000100, 0x000180, 0x000200, 0x000300,
 	0x000400, 0x000600, 0x000800, 0x000c00, 0x001000,
 	0x001800, 0x002000, 0x003000, 0x004000, 0x006000,
-
-	/* extended window */
-	0x008000, 0x00c000, 0x010000, 0x018000, 0x020000,
-	0x030000, 0x040000, 0x060000, 0x080000, 0x0c0000,
-	0x100000, 0x180000, 0x200000, 0x300000,
 }
 
 // The odd order in which the codegen code sizes are written.
 var codegenOrder = []uint32{16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15}
 
 type huffmanBitWriter struct {
-	w io.Writer
+	// writer is the underlying writer.
+	// Do not use it directly; use the write method, which ensures
+	// that Write errors are sticky.
+	writer io.Writer
+
 	// Data waiting to be written is bytes[0:nbytes]
 	// and then the low nbits of bits.
 	bits            uint64
@@ -96,7 +92,7 @@ type huffmanBitWriter struct {
 
 func newHuffmanBitWriter(w io.Writer) *huffmanBitWriter {
 	return &huffmanBitWriter{
-		w:               w,
+		writer:          w,
 		literalFreq:     make([]int32, maxNumLit),
 		offsetFreq:      make([]int32, offsetCodeCount),
 		codegen:         make([]uint8, maxNumLit+offsetCodeCount+1),
@@ -107,7 +103,7 @@ func newHuffmanBitWriter(w io.Writer) *huffmanBitWriter {
 }
 
 func (w *huffmanBitWriter) reset(writer io.Writer) {
-	w.w = writer
+	w.writer = writer
 	w.bits, w.nbits, w.nbytes, w.err = 0, 0, 0, nil
 	w.bytes = [bufferSize]byte{}
 }
@@ -129,11 +125,21 @@ func (w *huffmanBitWriter) flush() {
 		n++
 	}
 	w.bits = 0
-	_, w.err = w.w.Write(w.bytes[:n])
+	w.write(w.bytes[:n])
 	w.nbytes = 0
 }
 
+func (w *huffmanBitWriter) write(b []byte) {
+	if w.err != nil {
+		return
+	}
+	_, w.err = w.writer.Write(b)
+}
+
 func (w *huffmanBitWriter) writeBits(b int32, nb uint) {
+	if w.err != nil {
+		return
+	}
 	w.bits |= uint64(b) << w.nbits
 	w.nbits += nb
 	if w.nbits >= 48 {
@@ -150,7 +156,7 @@ func (w *huffmanBitWriter) writeBits(b int32, nb uint) {
 		bytes[5] = byte(bits >> 40)
 		n += 6
 		if n >= bufferFlushSize {
-			_, w.err = w.w.Write(w.bytes[:n])
+			w.write(w.bytes[:n])
 			n = 0
 		}
 		w.nbytes = n
@@ -173,13 +179,10 @@ func (w *huffmanBitWriter) writeBytes(bytes []byte) {
 		n++
 	}
 	if n != 0 {
-		_, w.err = w.w.Write(w.bytes[:n])
-		if w.err != nil {
-			return
-		}
+		w.write(w.bytes[:n])
 	}
 	w.nbytes = 0
-	_, w.err = w.w.Write(bytes)
+	w.write(bytes)
 }
 
 // RFC 1951 3.2.7 specifies a special run-length encoding for specifying
@@ -341,7 +344,7 @@ func (w *huffmanBitWriter) writeCode(c hcode) {
 		bytes[5] = byte(bits >> 40)
 		n += 6
 		if n >= bufferFlushSize {
-			_, w.err = w.w.Write(w.bytes[:n])
+			w.write(w.bytes[:n])
 			n = 0
 		}
 		w.nbytes = n
@@ -509,7 +512,7 @@ func (w *huffmanBitWriter) writeBlockDynamic(tokens []token, eof bool, input []b
 	// the literalEncoding and the offsetEncoding.
 	w.generateCodegen(numLiterals, numOffsets, w.literalEncoding, w.offsetEncoding)
 	w.codegenEncoding.generate(w.codegenFreq[:], 7)
-	size, numCodegens := w.dynamicSize(w.literalEncoding, huffOffset, 0)
+	size, numCodegens := w.dynamicSize(w.literalEncoding, w.offsetEncoding, 0)
 
 	// Store bytes, if we don't get a reasonable improvement.
 	if ssize, storable := w.storedSize(input); storable && ssize < (size+size>>4) {
@@ -572,6 +575,9 @@ func (w *huffmanBitWriter) indexTokens(tokens []token) (numLiterals, numOffsets 
 // writeTokens writes a slice of tokens to the output.
 // codes for literal and offset encoding must be supplied.
 func (w *huffmanBitWriter) writeTokens(tokens []token, leCodes, oeCodes []hcode) {
+	if w.err != nil {
+		return
+	}
 	for _, t := range tokens {
 		if t < matchType {
 			w.writeCode(leCodes[t.literal()])
@@ -676,9 +682,9 @@ func (w *huffmanBitWriter) writeBlockHuff(eof bool, input []byte) {
 		if n < bufferFlushSize {
 			continue
 		}
-		_, w.err = w.w.Write(w.bytes[:n])
+		w.write(w.bytes[:n])
 		if w.err != nil {
-			return
+			return // Return early in the event of write failures
 		}
 		n = 0
 	}

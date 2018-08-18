@@ -14,8 +14,6 @@ import (
 	"unsafe"
 )
 
-//go:generate go run mksyscall_windows.go -systemdll -output zsyscall_windows.go syscall_windows.go security_windows.go
-
 type Handle uintptr
 
 const InvalidHandle = ^Handle(0)
@@ -59,7 +57,7 @@ func UTF16ToString(s []uint16) string {
 
 // StringToUTF16Ptr returns pointer to the UTF-16 encoding of
 // the UTF-8 string s, with a terminating NUL added. If s
-// If s contains a NUL byte this function panics instead of
+// contains a NUL byte this function panics instead of
 // returning an error.
 //
 // Deprecated: Use UTF16PtrFromString instead.
@@ -75,8 +73,6 @@ func UTF16PtrFromString(s string) (*uint16, error) {
 	}
 	return &a[0], nil
 }
-
-func Getpagesize() int { return 4096 }
 
 // Errno is the Windows error number.
 type Errno uintptr
@@ -124,16 +120,16 @@ func (e Errno) Timeout() bool {
 // Implemented in runtime/syscall_windows.go.
 func compileCallback(fn interface{}, cleanstack bool) uintptr
 
-// Converts a Go function to a function pointer conforming
-// to the stdcall calling convention. This is useful when
-// interoperating with Windows code requiring callbacks.
+// NewCallback converts a Go function to a function pointer conforming to the stdcall calling convention.
+// This is useful when interoperating with Windows code requiring callbacks.
+// The argument is expected to be a function with with one uintptr-sized result. The function must not have arguments with size larger than the size of uintptr.
 func NewCallback(fn interface{}) uintptr {
 	return compileCallback(fn, true)
 }
 
-// Converts a Go function to a function pointer conforming
-// to the cdecl calling convention. This is useful when
-// interoperating with Windows code requiring callbacks.
+// NewCallbackCDecl converts a Go function to a function pointer conforming to the cdecl calling convention.
+// This is useful when interoperating with Windows code requiring callbacks.
+// The argument is expected to be a function with with one uintptr-sized result. The function must not have arguments with size larger than the size of uintptr.
 func NewCallbackCDecl(fn interface{}) uintptr {
 	return compileCallback(fn, false)
 }
@@ -173,6 +169,7 @@ func NewCallbackCDecl(fn interface{}) uintptr {
 //sys	CancelIo(s Handle) (err error)
 //sys	CancelIoEx(s Handle, o *Overlapped) (err error)
 //sys	CreateProcess(appName *uint16, commandLine *uint16, procSecurity *SecurityAttributes, threadSecurity *SecurityAttributes, inheritHandles bool, creationFlags uint32, env *uint16, currentDir *uint16, startupInfo *StartupInfo, outProcInfo *ProcessInformation) (err error) = CreateProcessW
+//sys	CreateProcessAsUser(token Token, appName *uint16, commandLine *uint16, procSecurity *SecurityAttributes, threadSecurity *SecurityAttributes, inheritHandles bool, creationFlags uint32, env *uint16, currentDir *uint16, startupInfo *StartupInfo, outProcInfo *ProcessInformation) (err error) = advapi32.CreateProcessAsUserW
 //sys	OpenProcess(da uint32, inheritHandle bool, pid uint32) (handle Handle, err error)
 //sys	TerminateProcess(handle Handle, exitcode uint32) (err error)
 //sys	GetExitCodeProcess(handle Handle, exitcode *uint32) (err error)
@@ -239,8 +236,6 @@ func NewCallbackCDecl(fn interface{}) uintptr {
 //sys	CreateHardLink(filename *uint16, existingfilename *uint16, reserved uintptr) (err error) [failretval&0xff==0] = CreateHardLinkW
 
 // syscall interface implementation for other packages
-
-func Exit(code int) { ExitProcess(uint32(code)) }
 
 func makeInheritSa() *SecurityAttributes {
 	var sa SecurityAttributes
@@ -337,6 +332,27 @@ func Write(fd Handle, p []byte) (n int, err error) {
 
 var ioSync int64
 
+var procSetFilePointerEx = modkernel32.NewProc("SetFilePointerEx")
+
+const ptrSize = unsafe.Sizeof(uintptr(0))
+
+// setFilePointerEx calls SetFilePointerEx.
+// See https://msdn.microsoft.com/en-us/library/windows/desktop/aa365542(v=vs.85).aspx
+func setFilePointerEx(handle Handle, distToMove int64, newFilePointer *int64, whence uint32) error {
+	var e1 Errno
+	if ptrSize == 8 {
+		_, _, e1 = Syscall6(procSetFilePointerEx.Addr(), 4, uintptr(handle), uintptr(distToMove), uintptr(unsafe.Pointer(newFilePointer)), uintptr(whence), 0, 0)
+	} else {
+		// distToMove is a LARGE_INTEGER:
+		// https://msdn.microsoft.com/en-us/library/windows/desktop/aa383713(v=vs.85).aspx
+		_, _, e1 = Syscall6(procSetFilePointerEx.Addr(), 5, uintptr(handle), uintptr(distToMove), uintptr(distToMove>>32), uintptr(unsafe.Pointer(newFilePointer)), uintptr(whence), 0)
+	}
+	if e1 != 0 {
+		return errnoErr(e1)
+	}
+	return nil
+}
+
 func Seek(fd Handle, offset int64, whence int) (newoffset int64, err error) {
 	var w uint32
 	switch whence {
@@ -347,18 +363,13 @@ func Seek(fd Handle, offset int64, whence int) (newoffset int64, err error) {
 	case 2:
 		w = FILE_END
 	}
-	hi := int32(offset >> 32)
-	lo := int32(offset)
 	// use GetFileType to check pipe, pipe can't do seek
 	ft, _ := GetFileType(fd)
 	if ft == FILE_TYPE_PIPE {
-		return 0, EPIPE
+		return 0, ESPIPE
 	}
-	rlo, e := SetFilePointer(fd, lo, &hi, w)
-	if e != nil {
-		return 0, e
-	}
-	return int64(hi)<<32 + int64(rlo), nil
+	err = setFilePointerEx(fd, offset, &newoffset, w)
+	return
 }
 
 func Close(fd Handle) (err error) {
@@ -1028,11 +1039,31 @@ func Readlink(path string, buf []byte) (n int, err error) {
 	case IO_REPARSE_TAG_SYMLINK:
 		data := (*symbolicLinkReparseBuffer)(unsafe.Pointer(&rdb.reparseBuffer))
 		p := (*[0xffff]uint16)(unsafe.Pointer(&data.PathBuffer[0]))
-		s = UTF16ToString(p[data.PrintNameOffset/2 : (data.PrintNameLength-data.PrintNameOffset)/2])
+		s = UTF16ToString(p[data.SubstituteNameOffset/2 : (data.SubstituteNameOffset+data.SubstituteNameLength)/2])
+		if data.Flags&_SYMLINK_FLAG_RELATIVE == 0 {
+			if len(s) >= 4 && s[:4] == `\??\` {
+				s = s[4:]
+				switch {
+				case len(s) >= 2 && s[1] == ':': // \??\C:\foo\bar
+					// do nothing
+				case len(s) >= 4 && s[:4] == `UNC\`: // \??\UNC\foo\bar
+					s = `\\` + s[4:]
+				default:
+					// unexpected; do nothing
+				}
+			} else {
+				// unexpected; do nothing
+			}
+		}
 	case _IO_REPARSE_TAG_MOUNT_POINT:
 		data := (*mountPointReparseBuffer)(unsafe.Pointer(&rdb.reparseBuffer))
 		p := (*[0xffff]uint16)(unsafe.Pointer(&data.PathBuffer[0]))
-		s = UTF16ToString(p[data.PrintNameOffset/2 : (data.PrintNameLength-data.PrintNameOffset)/2])
+		s = UTF16ToString(p[data.SubstituteNameOffset/2 : (data.SubstituteNameOffset+data.SubstituteNameLength)/2])
+		if len(s) >= 4 && s[:4] == `\??\` { // \??\C:\foo\bar
+			s = s[4:]
+		} else {
+			// unexpected; do nothing
+		}
 	default:
 		// the path is not a symlink or junction but another type of reparse
 		// point

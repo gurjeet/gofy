@@ -5,6 +5,8 @@
 package user
 
 import (
+	"internal/testenv"
+	"os"
 	"runtime"
 	"testing"
 )
@@ -16,8 +18,19 @@ func checkUser(t *testing.T) {
 }
 
 func TestCurrent(t *testing.T) {
-	if runtime.GOOS == "android" {
-		t.Skipf("skipping on %s", runtime.GOOS)
+	// The Go builders (in particular the ones using containers)
+	// often have minimal environments without $HOME or $USER set,
+	// which breaks Current which relies on those working as a
+	// fallback.
+	// TODO: we should fix that (Issue 24884) and remove these
+	// workarounds.
+	if testenv.Builder() != "" && runtime.GOOS != "windows" && runtime.GOOS != "plan9" {
+		if os.Getenv("HOME") == "" {
+			os.Setenv("HOME", "/tmp")
+		}
+		if os.Getenv("USER") == "" {
+			os.Setenv("USER", "gobuilder")
+		}
 	}
 	u, err := Current()
 	if err != nil {
@@ -31,6 +44,12 @@ func TestCurrent(t *testing.T) {
 	}
 }
 
+func BenchmarkCurrent(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		Current()
+	}
+}
+
 func compare(t *testing.T, want, got *User) {
 	if want.Uid != got.Uid {
 		t.Errorf("got Uid=%q; want %q", got.Uid, want.Uid)
@@ -41,15 +60,11 @@ func compare(t *testing.T, want, got *User) {
 	if want.Name != got.Name {
 		t.Errorf("got Name=%q; want %q", got.Name, want.Name)
 	}
-	// TODO(brainman): fix it once we know how.
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping Gid and HomeDir comparisons")
+	if want.HomeDir != got.HomeDir {
+		t.Errorf("got HomeDir=%q; want %q", got.HomeDir, want.HomeDir)
 	}
 	if want.Gid != got.Gid {
 		t.Errorf("got Gid=%q; want %q", got.Gid, want.Gid)
-	}
-	if want.HomeDir != got.HomeDir {
-		t.Errorf("got HomeDir=%q; want %q", got.HomeDir, want.HomeDir)
 	}
 }
 
@@ -64,6 +79,9 @@ func TestLookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Current: %v", err)
 	}
+	// TODO: Lookup() has a fast path that calls Current() and returns if the
+	// usernames match, so this test does not exercise very much. It would be
+	// good to try and test finding a different user than the current user.
 	got, err := Lookup(want.Username)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)

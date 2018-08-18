@@ -1,5 +1,5 @@
 // Derived from Inferno utils/6l/l.h and related files.
-// http://code.google.com/p/inferno-os/source/browse/utils/6l/l.h
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/6l/l.h
 //
 //	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
 //	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
@@ -32,156 +32,86 @@ package ld
 
 import (
 	"bufio"
+	"cmd/internal/objabi"
 	"cmd/internal/sys"
+	"cmd/link/internal/sym"
 	"debug/elf"
 	"fmt"
 )
 
-type LSym struct {
-	Name        string
-	Extname     string
-	Type        int16
-	Version     int16
-	Attr        Attribute
-	Localentry  uint8
-	Dynid       int32
-	Plt         int32
-	Got         int32
-	Align       int32
-	Elfsym      int32
-	LocalElfsym int32
-	Value       int64
-	Size        int64
-	// ElfType is set for symbols read from shared libraries by ldshlibsyms. It
-	// is not set for symbols defined by the packages being linked or by symbols
-	// read by ldelf (and so is left as elf.STT_NOTYPE).
-	ElfType     elf.SymType
-	Next        *LSym
-	Sub         *LSym
-	Outer       *LSym
-	Gotype      *LSym
-	Reachparent *LSym
-	File        string
-	Dynimplib   string
-	Dynimpvers  string
-	Sect        *Section
-	FuncInfo    *FuncInfo
-	P           []byte
-	R           []Reloc
-}
-
-func (s *LSym) String() string {
-	if s.Version == 0 {
-		return s.Name
-	}
-	return fmt.Sprintf("%s<%d>", s.Name, s.Version)
-}
-
-func (s *LSym) ElfsymForReloc() int32 {
-	// If putelfsym created a local version of this symbol, use that in all
-	// relocations.
-	if s.LocalElfsym != 0 {
-		return s.LocalElfsym
-	} else {
-		return s.Elfsym
-	}
-}
-
-// Attribute is a set of common symbol attributes.
-type Attribute int16
-
-const (
-	AttrDuplicateOK Attribute = 1 << iota
-	AttrExternal
-	AttrNoSplit
-	AttrReachable
-	AttrCgoExportDynamic
-	AttrCgoExportStatic
-	AttrSpecial
-	AttrStackCheck
-	AttrHidden
-	AttrOnList
-	AttrLocal
-	AttrReflectMethod
-)
-
-func (a Attribute) DuplicateOK() bool      { return a&AttrDuplicateOK != 0 }
-func (a Attribute) External() bool         { return a&AttrExternal != 0 }
-func (a Attribute) NoSplit() bool          { return a&AttrNoSplit != 0 }
-func (a Attribute) Reachable() bool        { return a&AttrReachable != 0 }
-func (a Attribute) CgoExportDynamic() bool { return a&AttrCgoExportDynamic != 0 }
-func (a Attribute) CgoExportStatic() bool  { return a&AttrCgoExportStatic != 0 }
-func (a Attribute) Special() bool          { return a&AttrSpecial != 0 }
-func (a Attribute) StackCheck() bool       { return a&AttrStackCheck != 0 }
-func (a Attribute) Hidden() bool           { return a&AttrHidden != 0 }
-func (a Attribute) OnList() bool           { return a&AttrOnList != 0 }
-func (a Attribute) Local() bool            { return a&AttrLocal != 0 }
-func (a Attribute) ReflectMethod() bool    { return a&AttrReflectMethod != 0 }
-
-func (a Attribute) CgoExport() bool {
-	return a.CgoExportDynamic() || a.CgoExportStatic()
-}
-
-func (a *Attribute) Set(flag Attribute, value bool) {
-	if value {
-		*a |= flag
-	} else {
-		*a &^= flag
-	}
-}
-
-type Reloc struct {
-	Off     int32
-	Siz     uint8
-	Done    uint8
-	Type    int32
-	Variant int32
-	Add     int64
-	Xadd    int64
-	Sym     *LSym
-	Xsym    *LSym
-}
-
-type Auto struct {
-	Asym    *LSym
-	Gotype  *LSym
-	Aoffset int32
-	Name    int16
-}
-
 type Shlib struct {
-	Path             string
-	Hash             []byte
-	Deps             []string
-	File             *elf.File
-	gcdata_addresses map[*LSym]uint64
+	Path            string
+	Hash            []byte
+	Deps            []string
+	File            *elf.File
+	gcdataAddresses map[*sym.Symbol]uint64
 }
 
+// Link holds the context for writing object code from a compiler
+// or for reading that input into the linker.
 type Link struct {
-	Goarm     int32
-	Headtype  int
+	Out *OutBuf
+
+	Syms *sym.Symbols
+
 	Arch      *sys.Arch
-	Debugvlog int32
+	Debugvlog int
 	Bso       *bufio.Writer
-	Windows   int32
-	Goroot    string
 
-	// Symbol lookup based on name and indexed by version.
-	Hash []map[string]*LSym
+	Loaded bool // set after all inputs have been loaded as symbols
 
-	Allsym     []*LSym
-	Tlsg       *LSym
-	Libdir     []string
-	Library    []*Library
-	Shlibs     []Shlib
-	Tlsoffset  int
-	Diag       func(string, ...interface{})
-	Cursym     *LSym
-	Version    int
-	Textp      []*LSym
-	Filesyms   []*LSym
-	Moduledata *LSym
-	LSymBatch  []LSym
+	IsELF    bool
+	HeadType objabi.HeadType
+
+	linkShared    bool // link against installed Go shared libraries
+	LinkMode      LinkMode
+	BuildMode     BuildMode
+	compressDWARF bool
+
+	Tlsg         *sym.Symbol
+	Libdir       []string
+	Library      []*sym.Library
+	LibraryByPkg map[string]*sym.Library
+	Shlibs       []Shlib
+	Tlsoffset    int
+	Textp        []*sym.Symbol
+	Filesyms     []*sym.Symbol
+	Moduledata   *sym.Symbol
+
+	PackageFile  map[string]string
+	PackageShlib map[string]string
+
+	tramps []*sym.Symbol // trampolines
+
+	// unresolvedSymSet is a set of erroneous unresolved references.
+	// Used to avoid duplicated error messages.
+	unresolvedSymSet map[unresolvedSymKey]bool
+
+	// Used to implement field tracking.
+	Reachparent map[*sym.Symbol]*sym.Symbol
+}
+
+type unresolvedSymKey struct {
+	from *sym.Symbol // Symbol that referenced unresolved "to"
+	to   *sym.Symbol // Unresolved symbol referenced by "from"
+}
+
+// ErrorUnresolved prints unresolved symbol error for r.Sym that is referenced from s.
+func (ctxt *Link) ErrorUnresolved(s *sym.Symbol, r *sym.Reloc) {
+	if ctxt.unresolvedSymSet == nil {
+		ctxt.unresolvedSymSet = make(map[unresolvedSymKey]bool)
+	}
+
+	k := unresolvedSymKey{from: s, to: r.Sym}
+	if !ctxt.unresolvedSymSet[k] {
+		ctxt.unresolvedSymSet[k] = true
+		// Give a special error message for main symbol (see #24809).
+		if r.Sym.Name == "main.main" {
+			Errorf(s, "function main is undeclared in the main package")
+		} else {
+			Errorf(s, "relocation target %s not defined", r.Sym.Name)
+		}
+	}
 }
 
 // The smallest possible offset from the hardware stack pointer to a local
@@ -201,39 +131,24 @@ func (ctxt *Link) FixedFrameSize() int64 {
 	}
 }
 
-func (l *Link) IncVersion() {
-	l.Version++
-	l.Hash = append(l.Hash, make(map[string]*LSym))
+func (ctxt *Link) Logf(format string, args ...interface{}) {
+	fmt.Fprintf(ctxt.Bso, format, args...)
+	ctxt.Bso.Flush()
 }
 
-type Library struct {
-	Objref string
-	Srcref string
-	File   string
-	Pkg    string
-	Shlib  string
-	hash   []byte
-}
-
-type FuncInfo struct {
-	Args        int32
-	Locals      int32
-	Autom       []Auto
-	Pcsp        Pcdata
-	Pcfile      Pcdata
-	Pcline      Pcdata
-	Pcdata      []Pcdata
-	Funcdata    []*LSym
-	Funcdataoff []int64
-	File        []*LSym
-}
-
-type Pcdata struct {
-	P []byte
+func addImports(ctxt *Link, l *sym.Library, pn string) {
+	pkg := objabi.PathToPrefix(l.Pkg)
+	for _, importStr := range l.ImportStrings {
+		lib := addlib(ctxt, pkg, pn, importStr)
+		if lib != nil {
+			l.Imports = append(l.Imports, lib)
+		}
+	}
+	l.ImportStrings = nil
 }
 
 type Pciter struct {
-	d       Pcdata
+	d       sym.Pcdata
 	p       []byte
 	pc      uint32
 	nextpc  uint32
@@ -242,34 +157,3 @@ type Pciter struct {
 	start   int
 	done    int
 }
-
-// Reloc.variant
-const (
-	RV_NONE = iota
-	RV_POWER_LO
-	RV_POWER_HI
-	RV_POWER_HA
-	RV_POWER_DS
-
-	// RV_390_DBL is a s390x-specific relocation variant that indicates that
-	// the value to be placed into the relocatable field should first be
-	// divided by 2.
-	RV_390_DBL
-
-	RV_CHECK_OVERFLOW = 1 << 8
-	RV_TYPE_MASK      = RV_CHECK_OVERFLOW - 1
-)
-
-// Pcdata iterator.
-//	for(pciterinit(ctxt, &it, &pcd); !it.done; pciternext(&it)) { it.value holds in [it.pc, it.nextpc) }
-
-// Link holds the context for writing object code from a compiler
-// to be linker input or for reading that input into the linker.
-
-// LinkArch is the definition of a single architecture.
-
-const (
-	LinkAuto = 0 + iota
-	LinkInternal
-	LinkExternal
-)

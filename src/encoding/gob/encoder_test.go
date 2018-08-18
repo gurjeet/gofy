@@ -8,7 +8,9 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"io/ioutil"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -52,6 +54,71 @@ func TestBasicEncoderDecoder(t *testing.T) {
 			t.Fatalf("%T: expected %v got %v", value, value, result.Elem().Interface())
 		}
 	}
+}
+
+func TestEncodeIntSlice(t *testing.T) {
+
+	s8 := []int8{1, 5, 12, 22, 35, 51, 70, 92, 117}
+	s16 := []int16{145, 176, 210, 247, 287, 330, 376, 425, 477}
+	s32 := []int32{532, 590, 651, 715, 782, 852, 925, 1001, 1080}
+	s64 := []int64{1162, 1247, 1335, 1426, 1520, 1617, 1717, 1820, 1926}
+
+	t.Run("int8", func(t *testing.T) {
+		var sink bytes.Buffer
+		enc := NewEncoder(&sink)
+		enc.Encode(s8)
+
+		dec := NewDecoder(&sink)
+		res := make([]int8, 9)
+		dec.Decode(&res)
+
+		if !reflect.DeepEqual(s8, res) {
+			t.Fatalf("EncodeIntSlice: expected %v, got %v", s8, res)
+		}
+	})
+
+	t.Run("int16", func(t *testing.T) {
+		var sink bytes.Buffer
+		enc := NewEncoder(&sink)
+		enc.Encode(s16)
+
+		dec := NewDecoder(&sink)
+		res := make([]int16, 9)
+		dec.Decode(&res)
+
+		if !reflect.DeepEqual(s16, res) {
+			t.Fatalf("EncodeIntSlice: expected %v, got %v", s16, res)
+		}
+	})
+
+	t.Run("int32", func(t *testing.T) {
+		var sink bytes.Buffer
+		enc := NewEncoder(&sink)
+		enc.Encode(s32)
+
+		dec := NewDecoder(&sink)
+		res := make([]int32, 9)
+		dec.Decode(&res)
+
+		if !reflect.DeepEqual(s32, res) {
+			t.Fatalf("EncodeIntSlice: expected %v, got %v", s32, res)
+		}
+	})
+
+	t.Run("int64", func(t *testing.T) {
+		var sink bytes.Buffer
+		enc := NewEncoder(&sink)
+		enc.Encode(s64)
+
+		dec := NewDecoder(&sink)
+		res := make([]int64, 9)
+		dec.Decode(&res)
+
+		if !reflect.DeepEqual(s64, res) {
+			t.Fatalf("EncodeIntSlice: expected %v, got %v", s64, res)
+		}
+	})
+
 }
 
 type ET0 struct {
@@ -829,30 +896,95 @@ func TestPtrToMapOfMap(t *testing.T) {
 	}
 }
 
+// Test that untyped nils generate an error, not a panic.
+// See Issue 16204.
+func TestCatchInvalidNilValue(t *testing.T) {
+	encodeErr, panicErr := encodeAndRecover(nil)
+	if panicErr != nil {
+		t.Fatalf("panicErr=%v, should not panic encoding untyped nil", panicErr)
+	}
+	if encodeErr == nil {
+		t.Errorf("got err=nil, want non-nil error when encoding untyped nil value")
+	} else if !strings.Contains(encodeErr.Error(), "nil value") {
+		t.Errorf("expected 'nil value' error; got err=%v", encodeErr)
+	}
+}
+
 // A top-level nil pointer generates a panic with a helpful string-valued message.
 func TestTopLevelNilPointer(t *testing.T) {
-	errMsg := topLevelNilPanic(t)
-	if errMsg == "" {
+	var ip *int
+	encodeErr, panicErr := encodeAndRecover(ip)
+	if encodeErr != nil {
+		t.Fatal("error in encode:", encodeErr)
+	}
+	if panicErr == nil {
 		t.Fatal("top-level nil pointer did not panic")
 	}
+	errMsg := panicErr.Error()
 	if !strings.Contains(errMsg, "nil pointer") {
 		t.Fatal("expected nil pointer error, got:", errMsg)
 	}
 }
 
-func topLevelNilPanic(t *testing.T) (panicErr string) {
+func encodeAndRecover(value interface{}) (encodeErr, panicErr error) {
 	defer func() {
 		e := recover()
-		if err, ok := e.(string); ok {
-			panicErr = err
+		if e != nil {
+			switch err := e.(type) {
+			case error:
+				panicErr = err
+			default:
+				panicErr = fmt.Errorf("%v", err)
+			}
 		}
 	}()
-	var ip *int
-	buf := new(bytes.Buffer)
-	if err := NewEncoder(buf).Encode(ip); err != nil {
-		t.Fatal("error in encode:", err)
-	}
+
+	encodeErr = NewEncoder(ioutil.Discard).Encode(value)
 	return
+}
+
+func TestNilPointerPanics(t *testing.T) {
+	var (
+		nilStringPtr      *string
+		intMap            = make(map[int]int)
+		intMapPtr         = &intMap
+		nilIntMapPtr      *map[int]int
+		zero              int
+		nilBoolChannel    chan bool
+		nilBoolChannelPtr *chan bool
+		nilStringSlice    []string
+		stringSlice       = make([]string, 1)
+		nilStringSlicePtr *[]string
+	)
+
+	testCases := []struct {
+		value     interface{}
+		mustPanic bool
+	}{
+		{nilStringPtr, true},
+		{intMap, false},
+		{intMapPtr, false},
+		{nilIntMapPtr, true},
+		{zero, false},
+		{nilStringSlice, false},
+		{stringSlice, false},
+		{nilStringSlicePtr, true},
+		{nilBoolChannel, false},
+		{nilBoolChannelPtr, true},
+	}
+
+	for _, tt := range testCases {
+		_, panicErr := encodeAndRecover(tt.value)
+		if tt.mustPanic {
+			if panicErr == nil {
+				t.Errorf("expected panic with input %#v, did not panic", tt.value)
+			}
+			continue
+		}
+		if panicErr != nil {
+			t.Fatalf("expected no panic with input %#v, got panic=%v", tt.value, panicErr)
+		}
+	}
 }
 
 func TestNilPointerInsideInterface(t *testing.T) {
@@ -883,7 +1015,7 @@ type Bug4Secret struct {
 }
 
 // Test that a failed compilation doesn't leave around an executable encoder.
-// Issue 3273.
+// Issue 3723.
 func TestMutipleEncodingsOfBadType(t *testing.T) {
 	x := Bug4Public{
 		Name:   "name",
@@ -999,6 +1131,9 @@ func TestBadData(t *testing.T) {
 
 // TestHugeWriteFails tests that enormous messages trigger an error.
 func TestHugeWriteFails(t *testing.T) {
+	if runtime.GOARCH == "wasm" {
+		t.Skip("out of memory on wasm")
+	}
 	if testing.Short() {
 		// Requires allocating a monster, so don't do this from all.bash.
 		t.Skip("skipping huge allocation in short mode")

@@ -5,6 +5,8 @@
 package runtime_test
 
 import (
+	"internal/testenv"
+	"math"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -210,11 +212,14 @@ func TestNonblockRecvRace(t *testing.T) {
 			select {
 			case <-c:
 			default:
-				t.Fatal("chan is not ready")
+				t.Error("chan is not ready")
 			}
 		}()
 		close(c)
 		<-c
+		if t.Failed() {
+			return
+		}
 	}
 }
 
@@ -311,14 +316,16 @@ func TestSelfSelect(t *testing.T) {
 						case c <- p:
 						case v := <-c:
 							if chanCap == 0 && v == p {
-								t.Fatalf("self receive")
+								t.Errorf("self receive")
+								return
 							}
 						}
 					} else {
 						select {
 						case v := <-c:
 							if chanCap == 0 && v == p {
-								t.Fatalf("self receive")
+								t.Errorf("self receive")
+								return
 							}
 						case c <- p:
 						}
@@ -422,6 +429,65 @@ func TestSelectStress(t *testing.T) {
 		}
 		wg.Done()
 	}()
+	wg.Wait()
+}
+
+func TestSelectFairness(t *testing.T) {
+	const trials = 10000
+	if runtime.GOOS == "linux" && runtime.GOARCH == "ppc64le" {
+		testenv.SkipFlaky(t, 22047)
+	}
+	c1 := make(chan byte, trials+1)
+	c2 := make(chan byte, trials+1)
+	for i := 0; i < trials+1; i++ {
+		c1 <- 1
+		c2 <- 2
+	}
+	c3 := make(chan byte)
+	c4 := make(chan byte)
+	out := make(chan byte)
+	done := make(chan byte)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			var b byte
+			select {
+			case b = <-c3:
+			case b = <-c4:
+			case b = <-c1:
+			case b = <-c2:
+			}
+			select {
+			case out <- b:
+			case <-done:
+				return
+			}
+		}
+	}()
+	cnt1, cnt2 := 0, 0
+	for i := 0; i < trials; i++ {
+		switch b := <-out; b {
+		case 1:
+			cnt1++
+		case 2:
+			cnt2++
+		default:
+			t.Fatalf("unexpected value %d on channel", b)
+		}
+	}
+	// If the select in the goroutine is fair,
+	// cnt1 and cnt2 should be about the same value.
+	// With 10,000 trials, the expected margin of error at
+	// a confidence level of five nines is 4.4172 / (2 * Sqrt(10000)).
+	r := float64(cnt1) / trials
+	e := math.Abs(r - 0.5)
+	t.Log(cnt1, cnt2, r, e)
+	if e > 4.4172/(2*math.Sqrt(trials)) {
+		t.Errorf("unfair select: in %d trials, results were %d, %d", trials, cnt1, cnt2)
+	}
+	close(done)
 	wg.Wait()
 }
 
@@ -593,8 +659,10 @@ func TestSelectStackAdjust(t *testing.T) {
 	// pointers are adjusted correctly by stack shrinking.
 	c := make(chan *int)
 	d := make(chan *int)
-	ready := make(chan bool)
-	go func() {
+	ready1 := make(chan bool)
+	ready2 := make(chan bool)
+
+	f := func(ready chan bool, dup bool) {
 		// Temporarily grow the stack to 10K.
 		stackGrowthRecursive((10 << 10) / (128 * 8))
 
@@ -604,10 +672,20 @@ func TestSelectStackAdjust(t *testing.T) {
 		val := 42
 		var cx *int
 		cx = &val
+
+		var c2 chan *int
+		var d2 chan *int
+		if dup {
+			c2 = c
+			d2 = d
+		}
+
 		// Receive from d. cx won't be affected.
 		select {
 		case cx = <-c:
+		case <-c2:
 		case <-d:
+		case <-d2:
 		}
 
 		// Check that pointer in cx was adjusted correctly.
@@ -622,10 +700,14 @@ func TestSelectStackAdjust(t *testing.T) {
 			}
 		}
 		ready <- true
-	}()
+	}
 
-	// Let the goroutine get into the select.
-	<-ready
+	go f(ready1, false)
+	go f(ready2, true)
+
+	// Let the goroutines get into the select.
+	<-ready1
+	<-ready2
 	time.Sleep(10 * time.Millisecond)
 
 	// Force concurrent GC a few times.
@@ -642,9 +724,59 @@ func TestSelectStackAdjust(t *testing.T) {
 done:
 	selectSink = nil
 
-	// Wake select.
-	d <- nil
-	<-ready
+	// Wake selects.
+	close(d)
+	<-ready1
+	<-ready2
+}
+
+type struct0 struct{}
+
+func BenchmarkMakeChan(b *testing.B) {
+	b.Run("Byte", func(b *testing.B) {
+		var x chan byte
+		for i := 0; i < b.N; i++ {
+			x = make(chan byte, 8)
+		}
+		close(x)
+	})
+	b.Run("Int", func(b *testing.B) {
+		var x chan int
+		for i := 0; i < b.N; i++ {
+			x = make(chan int, 8)
+		}
+		close(x)
+	})
+	b.Run("Ptr", func(b *testing.B) {
+		var x chan *byte
+		for i := 0; i < b.N; i++ {
+			x = make(chan *byte, 8)
+		}
+		close(x)
+	})
+	b.Run("Struct", func(b *testing.B) {
+		b.Run("0", func(b *testing.B) {
+			var x chan struct0
+			for i := 0; i < b.N; i++ {
+				x = make(chan struct0, 8)
+			}
+			close(x)
+		})
+		b.Run("32", func(b *testing.B) {
+			var x chan struct32
+			for i := 0; i < b.N; i++ {
+				x = make(chan struct32, 8)
+			}
+			close(x)
+		})
+		b.Run("40", func(b *testing.B) {
+			var x chan struct40
+			for i := 0; i < b.N; i++ {
+				x = make(chan struct40, 8)
+			}
+			close(x)
+		})
+	})
 }
 
 func BenchmarkChanNonblocking(b *testing.B) {

@@ -11,12 +11,14 @@ import "sync"
 
 func OkFunc(*sync.Mutex) {}
 func BadFunc(sync.Mutex) {} // ERROR "BadFunc passes lock by value: sync.Mutex"
+func BadFunc2(sync.Map)  {} // ERROR "BadFunc2 passes lock by value: sync.Map contains sync.Mutex"
 func OkRet() *sync.Mutex {}
-func BadRet() sync.Mutex {} // ERROR "BadRet returns lock by value: sync.Mutex"
+func BadRet() sync.Mutex {} // Don't warn about results
 
 var (
-	OkClosure  = func(*sync.Mutex) {}
-	BadClosure = func(sync.Mutex) {} // ERROR "func passes lock by value: sync.Mutex"
+	OkClosure   = func(*sync.Mutex) {}
+	BadClosure  = func(sync.Mutex) {} // ERROR "func passes lock by value: sync.Mutex"
+	BadClosure2 = func(sync.Map) {}   // ERROR "func passes lock by value: sync.Map contains sync.Mutex"
 )
 
 type EmbeddedRWMutex struct {
@@ -28,7 +30,7 @@ func (EmbeddedRWMutex) BadMeth() {} // ERROR "BadMeth passes lock by value: test
 func OkFunc(e *EmbeddedRWMutex)  {}
 func BadFunc(EmbeddedRWMutex)    {} // ERROR "BadFunc passes lock by value: testdata.EmbeddedRWMutex"
 func OkRet() *EmbeddedRWMutex    {}
-func BadRet() EmbeddedRWMutex    {} // ERROR "BadRet returns lock by value: testdata.EmbeddedRWMutex"
+func BadRet() EmbeddedRWMutex    {} // Don't warn about results
 
 type FieldMutex struct {
 	s sync.Mutex
@@ -86,8 +88,10 @@ func FuncCallInterfaceArg(f func(a int, b interface{})) {
 	f(1, "foo")
 	f(2, &t)
 	f(3, &sync.Mutex{})
-	f(4, m) // ERROR "function call copies lock value: sync.Mutex"
-	f(5, t) // ERROR "function call copies lock value: struct{lock sync.Mutex} contains sync.Mutex"
+	f(4, m) // ERROR "call of f copies lock value: sync.Mutex"
+	f(5, t) // ERROR "call of f copies lock value: struct.lock sync.Mutex. contains sync.Mutex"
+	var fntab []func(t)
+	fntab[0](t) // ERROR "call of fntab.0. copies lock value: struct.lock sync.Mutex. contains sync.Mutex"
 }
 
 // Returning lock via interface value
@@ -103,8 +107,16 @@ func ReturnViaInterface(x int) (int, interface{}) {
 	case 2:
 		return 2, m // ERROR "return copies lock value: sync.Mutex"
 	default:
-		return 3, t // ERROR "return copies lock value: struct{lock sync.Mutex} contains sync.Mutex"
+		return 3, t // ERROR "return copies lock value: struct.lock sync.Mutex. contains sync.Mutex"
 	}
+}
+
+// Some cases that we don't warn about.
+
+func AcceptedCases() {
+	x := EmbeddedRwMutex{} // composite literal on RHS is OK (#16227)
+	x = BadRet()           // function call on RHS is OK (#16227)
+	x = *OKRet()           // indirection of function call on RHS is OK (#16227)
 }
 
 // TODO: Unfortunate cases

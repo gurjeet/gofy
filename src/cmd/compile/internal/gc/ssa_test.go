@@ -7,28 +7,41 @@ package gc
 import (
 	"bytes"
 	"internal/testenv"
+	"io/ioutil"
+	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
 
 // TODO: move all these tests elsewhere?
 // Perhaps teach test/run.go how to run them with a new action verb.
-func runTest(t *testing.T, filename string) {
-	doTest(t, filename, "run")
+func runTest(t *testing.T, filename string, flags ...string) {
+	t.Parallel()
+	doTest(t, filename, "run", flags...)
 }
-func buildTest(t *testing.T, filename string) {
-	doTest(t, filename, "build")
+func buildTest(t *testing.T, filename string, flags ...string) {
+	t.Parallel()
+	doTest(t, filename, "build", flags...)
 }
-func doTest(t *testing.T, filename string, kind string) {
+func doTest(t *testing.T, filename string, kind string, flags ...string) {
 	testenv.MustHaveGoBuild(t)
+	gotool := testenv.GoToolPath(t)
+
 	var stdout, stderr bytes.Buffer
-	cmd := exec.Command("go", kind, filepath.Join("testdata", filename))
+	args := []string{kind}
+	if len(flags) == 0 {
+		args = append(args, "-gcflags=-d=ssa/check/on")
+	} else {
+		args = append(args, flags...)
+	}
+	args = append(args, filepath.Join("testdata", filename))
+	cmd := exec.Command(gotool, args...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	if err != nil {
 		t.Fatalf("Failed: %v:\nOut: %s\nStderr: %s\n", err, &stdout, &stderr)
 	}
 	if s := stdout.String(); s != "" {
@@ -39,67 +52,123 @@ func doTest(t *testing.T, filename string, kind string) {
 	}
 }
 
-// TestShortCircuit tests OANDAND and OOROR expressions and short circuiting.
-func TestShortCircuit(t *testing.T) { runTest(t, "short_ssa.go") }
-
-// TestBreakContinue tests that continue and break statements do what they say.
-func TestBreakContinue(t *testing.T) { runTest(t, "break_ssa.go") }
-
-// TestTypeAssertion tests type assertions.
-func TestTypeAssertion(t *testing.T) { runTest(t, "assert_ssa.go") }
-
-// TestArithmetic tests that both backends have the same result for arithmetic expressions.
-func TestArithmetic(t *testing.T) {
-	if runtime.GOARCH == "386" {
-		t.Skip("legacy 386 compiler can't handle this test")
+// runGenTest runs a test-generator, then runs the generated test.
+// Generated test can either fail in compilation or execution.
+// The environment variable parameter(s) is passed to the run
+// of the generated test.
+func runGenTest(t *testing.T, filename, tmpname string, ev ...string) {
+	testenv.MustHaveGoRun(t)
+	gotool := testenv.GoToolPath(t)
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(gotool, "run", filepath.Join("testdata", filename))
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Failed: %v:\nOut: %s\nStderr: %s\n", err, &stdout, &stderr)
 	}
-	runTest(t, "arith_ssa.go")
+	// Write stdout into a temporary file
+	tmpdir, ok := ioutil.TempDir("", tmpname)
+	if ok != nil {
+		t.Fatalf("Failed to create temporary directory")
+	}
+	defer os.RemoveAll(tmpdir)
+
+	rungo := filepath.Join(tmpdir, "run.go")
+	ok = ioutil.WriteFile(rungo, stdout.Bytes(), 0600)
+	if ok != nil {
+		t.Fatalf("Failed to create temporary file " + rungo)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	cmd = exec.Command(gotool, "run", "-gcflags=-d=ssa/check/on", rungo)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.Env = append(cmd.Env, ev...)
+	err := cmd.Run()
+	if err != nil {
+		t.Fatalf("Failed: %v:\nOut: %s\nStderr: %s\n", err, &stdout, &stderr)
+	}
+	if s := stderr.String(); s != "" {
+		t.Errorf("Stderr = %s\nWant empty", s)
+	}
+	if s := stdout.String(); s != "" {
+		t.Errorf("Stdout = %s\nWant empty", s)
+	}
 }
 
+func TestGenFlowGraph(t *testing.T) {
+	if testing.Short() {
+		t.Skip("not run in short mode.")
+	}
+	runGenTest(t, "flowgraph_generator1.go", "ssa_fg_tmp1")
+}
+
+// TestShortCircuit tests OANDAND and OOROR expressions and short circuiting.
+func TestShortCircuit(t *testing.T) { runTest(t, "short.go") }
+
+// TestBreakContinue tests that continue and break statements do what they say.
+func TestBreakContinue(t *testing.T) { runTest(t, "break.go") }
+
+// TestTypeAssertion tests type assertions.
+func TestTypeAssertion(t *testing.T) { runTest(t, "assert.go") }
+
+// TestArithmetic tests that both backends have the same result for arithmetic expressions.
+func TestArithmetic(t *testing.T) { runTest(t, "arith.go") }
+
 // TestFP tests that both backends have the same result for floating point expressions.
-func TestFP(t *testing.T) { runTest(t, "fp_ssa.go") }
+func TestFP(t *testing.T) { runTest(t, "fp.go") }
+
+func TestFPSoftFloat(t *testing.T) {
+	runTest(t, "fp.go", "-gcflags=-d=softfloat,ssa/check/on")
+}
 
 // TestArithmeticBoundary tests boundary results for arithmetic operations.
-func TestArithmeticBoundary(t *testing.T) { runTest(t, "arithBoundary_ssa.go") }
+func TestArithmeticBoundary(t *testing.T) { runTest(t, "arithBoundary.go") }
 
 // TestArithmeticConst tests results for arithmetic operations against constants.
-func TestArithmeticConst(t *testing.T) { runTest(t, "arithConst_ssa.go") }
+func TestArithmeticConst(t *testing.T) { runTest(t, "arithConst.go") }
 
-func TestChan(t *testing.T) { runTest(t, "chan_ssa.go") }
+func TestChan(t *testing.T) { runTest(t, "chan.go") }
 
-func TestCompound(t *testing.T) { runTest(t, "compound_ssa.go") }
+// TestComparisonsConst tests results for comparison operations against constants.
+func TestComparisonsConst(t *testing.T) { runTest(t, "cmpConst.go") }
 
-func TestCtl(t *testing.T) { runTest(t, "ctl_ssa.go") }
+func TestCompound(t *testing.T) { runTest(t, "compound.go") }
 
-func TestLoadStore(t *testing.T) { runTest(t, "loadstore_ssa.go") }
+func TestCtl(t *testing.T) { runTest(t, "ctl.go") }
 
-func TestMap(t *testing.T) { runTest(t, "map_ssa.go") }
+func TestLoadStore(t *testing.T) { runTest(t, "loadstore.go") }
 
-func TestRegalloc(t *testing.T) { runTest(t, "regalloc_ssa.go") }
+func TestMap(t *testing.T) { runTest(t, "map.go") }
 
-func TestString(t *testing.T) { runTest(t, "string_ssa.go") }
+func TestRegalloc(t *testing.T) { runTest(t, "regalloc.go") }
 
-func TestDeferNoReturn(t *testing.T) { buildTest(t, "deferNoReturn_ssa.go") }
+func TestString(t *testing.T) { runTest(t, "string.go") }
+
+func TestDeferNoReturn(t *testing.T) { buildTest(t, "deferNoReturn.go") }
 
 // TestClosure tests closure related behavior.
-func TestClosure(t *testing.T) { runTest(t, "closure_ssa.go") }
+func TestClosure(t *testing.T) { runTest(t, "closure.go") }
 
-func TestArray(t *testing.T) { runTest(t, "array_ssa.go") }
+func TestArray(t *testing.T) { runTest(t, "array.go") }
 
-func TestAppend(t *testing.T) { runTest(t, "append_ssa.go") }
+func TestAppend(t *testing.T) { runTest(t, "append.go") }
 
-func TestZero(t *testing.T) { runTest(t, "zero_ssa.go") }
+func TestZero(t *testing.T) { runTest(t, "zero.go") }
 
-func TestAddressed(t *testing.T) { runTest(t, "addressed_ssa.go") }
+func TestAddressed(t *testing.T) { runTest(t, "addressed.go") }
 
-func TestCopy(t *testing.T) { runTest(t, "copy_ssa.go") }
+func TestCopy(t *testing.T) { runTest(t, "copy.go") }
 
-func TestUnsafe(t *testing.T) { runTest(t, "unsafe_ssa.go") }
+func TestUnsafe(t *testing.T) { runTest(t, "unsafe.go") }
 
-func TestPhi(t *testing.T) { runTest(t, "phi_ssa.go") }
+func TestPhi(t *testing.T) { runTest(t, "phi.go") }
 
 func TestSlice(t *testing.T) { runTest(t, "slice.go") }
 
 func TestNamedReturn(t *testing.T) { runTest(t, "namedReturn.go") }
 
 func TestDuplicateLoad(t *testing.T) { runTest(t, "dupLoad.go") }
+
+func TestSqrt(t *testing.T) { runTest(t, "sqrt_const.go") }

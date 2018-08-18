@@ -14,61 +14,32 @@ import (
 	"testing"
 )
 
-func benchmarkEncoder(b *testing.B, testfile, level, n int) {
-	b.StopTimer()
-	b.SetBytes(int64(n))
-	buf0, err := ioutil.ReadFile(testfiles[testfile])
-	if err != nil {
-		b.Fatal(err)
-	}
-	if len(buf0) == 0 {
-		b.Fatalf("test file %q has no data", testfiles[testfile])
-	}
-	buf1 := make([]byte, n)
-	for i := 0; i < n; i += len(buf0) {
-		if len(buf0) > n-i {
-			buf0 = buf0[:n-i]
-		}
-		copy(buf1[i:], buf0)
-	}
-	buf0 = nil
-	w, err := NewWriter(ioutil.Discard, level)
-	if err != nil {
-		b.Fatal(err)
-	}
-	runtime.GC()
-	b.StartTimer()
-	for i := 0; i < b.N; i++ {
-		w.Reset(ioutil.Discard)
-		w.Write(buf1)
-		w.Close()
-	}
-}
+func BenchmarkEncode(b *testing.B) {
+	doBench(b, func(b *testing.B, buf0 []byte, level, n int) {
+		b.StopTimer()
+		b.SetBytes(int64(n))
 
-func BenchmarkEncodeDigitsHuffman1e4(b *testing.B)  { benchmarkEncoder(b, digits, huffman, 1e4) }
-func BenchmarkEncodeDigitsHuffman1e5(b *testing.B)  { benchmarkEncoder(b, digits, huffman, 1e5) }
-func BenchmarkEncodeDigitsHuffman1e6(b *testing.B)  { benchmarkEncoder(b, digits, huffman, 1e6) }
-func BenchmarkEncodeDigitsSpeed1e4(b *testing.B)    { benchmarkEncoder(b, digits, speed, 1e4) }
-func BenchmarkEncodeDigitsSpeed1e5(b *testing.B)    { benchmarkEncoder(b, digits, speed, 1e5) }
-func BenchmarkEncodeDigitsSpeed1e6(b *testing.B)    { benchmarkEncoder(b, digits, speed, 1e6) }
-func BenchmarkEncodeDigitsDefault1e4(b *testing.B)  { benchmarkEncoder(b, digits, default_, 1e4) }
-func BenchmarkEncodeDigitsDefault1e5(b *testing.B)  { benchmarkEncoder(b, digits, default_, 1e5) }
-func BenchmarkEncodeDigitsDefault1e6(b *testing.B)  { benchmarkEncoder(b, digits, default_, 1e6) }
-func BenchmarkEncodeDigitsCompress1e4(b *testing.B) { benchmarkEncoder(b, digits, compress, 1e4) }
-func BenchmarkEncodeDigitsCompress1e5(b *testing.B) { benchmarkEncoder(b, digits, compress, 1e5) }
-func BenchmarkEncodeDigitsCompress1e6(b *testing.B) { benchmarkEncoder(b, digits, compress, 1e6) }
-func BenchmarkEncodeTwainHuffman1e4(b *testing.B)   { benchmarkEncoder(b, twain, huffman, 1e4) }
-func BenchmarkEncodeTwainHuffman1e5(b *testing.B)   { benchmarkEncoder(b, twain, huffman, 1e5) }
-func BenchmarkEncodeTwainHuffman1e6(b *testing.B)   { benchmarkEncoder(b, twain, huffman, 1e6) }
-func BenchmarkEncodeTwainSpeed1e4(b *testing.B)     { benchmarkEncoder(b, twain, speed, 1e4) }
-func BenchmarkEncodeTwainSpeed1e5(b *testing.B)     { benchmarkEncoder(b, twain, speed, 1e5) }
-func BenchmarkEncodeTwainSpeed1e6(b *testing.B)     { benchmarkEncoder(b, twain, speed, 1e6) }
-func BenchmarkEncodeTwainDefault1e4(b *testing.B)   { benchmarkEncoder(b, twain, default_, 1e4) }
-func BenchmarkEncodeTwainDefault1e5(b *testing.B)   { benchmarkEncoder(b, twain, default_, 1e5) }
-func BenchmarkEncodeTwainDefault1e6(b *testing.B)   { benchmarkEncoder(b, twain, default_, 1e6) }
-func BenchmarkEncodeTwainCompress1e4(b *testing.B)  { benchmarkEncoder(b, twain, compress, 1e4) }
-func BenchmarkEncodeTwainCompress1e5(b *testing.B)  { benchmarkEncoder(b, twain, compress, 1e5) }
-func BenchmarkEncodeTwainCompress1e6(b *testing.B)  { benchmarkEncoder(b, twain, compress, 1e6) }
+		buf1 := make([]byte, n)
+		for i := 0; i < n; i += len(buf0) {
+			if len(buf0) > n-i {
+				buf0 = buf0[:n-i]
+			}
+			copy(buf1[i:], buf0)
+		}
+		buf0 = nil
+		w, err := NewWriter(ioutil.Discard, level)
+		if err != nil {
+			b.Fatal(err)
+		}
+		runtime.GC()
+		b.StartTimer()
+		for i := 0; i < b.N; i++ {
+			w.Reset(ioutil.Discard)
+			w.Write(buf1)
+			w.Close()
+		}
+	})
+}
 
 // errorWriter is a writer that fails after N writes.
 type errorWriter struct {
@@ -85,6 +56,7 @@ func (e *errorWriter) Write(b []byte) (int, error) {
 
 // Test if errors from the underlying writer is passed upwards.
 func TestWriteError(t *testing.T) {
+	t.Parallel()
 	buf := new(bytes.Buffer)
 	n := 65536
 	if !testing.Short() {
@@ -104,7 +76,7 @@ func TestWriteError(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewWriter: level %d: %v", l, err)
 			}
-			n, err := io.CopyBuffer(w, bytes.NewBuffer(in), copyBuffer)
+			n, err := io.CopyBuffer(w, struct{ io.Reader }{bytes.NewBuffer(in)}, copyBuffer)
 			if err == nil {
 				t.Fatalf("Level %d: Expected an error, writer was %#v", l, ew)
 			}
@@ -141,19 +113,16 @@ func TestWriteError(t *testing.T) {
 
 // Test if two runs produce identical results
 // even when writing different sizes to the Writer.
-func TestDeterministicL0(t *testing.T)  { testDeterministic(0, t) }
-func TestDeterministicL1(t *testing.T)  { testDeterministic(1, t) }
-func TestDeterministicL2(t *testing.T)  { testDeterministic(2, t) }
-func TestDeterministicL3(t *testing.T)  { testDeterministic(3, t) }
-func TestDeterministicL4(t *testing.T)  { testDeterministic(4, t) }
-func TestDeterministicL5(t *testing.T)  { testDeterministic(5, t) }
-func TestDeterministicL6(t *testing.T)  { testDeterministic(6, t) }
-func TestDeterministicL7(t *testing.T)  { testDeterministic(7, t) }
-func TestDeterministicL8(t *testing.T)  { testDeterministic(8, t) }
-func TestDeterministicL9(t *testing.T)  { testDeterministic(9, t) }
-func TestDeterministicLM2(t *testing.T) { testDeterministic(-2, t) }
+func TestDeterministic(t *testing.T) {
+	t.Parallel()
+	for i := 0; i <= 9; i++ {
+		t.Run(fmt.Sprint("L", i), func(t *testing.T) { testDeterministic(i, t) })
+	}
+	t.Run("LM2", func(t *testing.T) { testDeterministic(-2, t) })
+}
 
 func testDeterministic(i int, t *testing.T) {
+	t.Parallel()
 	// Test so much we cross a good number of block boundaries.
 	var length = maxStoreBlockSize*30 + 500
 	if testing.Short() {
@@ -176,7 +145,7 @@ func testDeterministic(i int, t *testing.T) {
 	}
 	// Use a very small prime sized buffer.
 	cbuf := make([]byte, 787)
-	_, err = io.CopyBuffer(w, br, cbuf)
+	_, err = io.CopyBuffer(w, struct{ io.Reader }{br}, cbuf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +160,7 @@ func testDeterministic(i int, t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = io.CopyBuffer(w2, br2, cbuf)
+	_, err = io.CopyBuffer(w2, struct{ io.Reader }{br2}, cbuf)
 	if err != nil {
 		t.Fatal(err)
 	}

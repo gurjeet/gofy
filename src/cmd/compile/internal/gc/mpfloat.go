@@ -5,9 +5,9 @@
 package gc
 
 import (
-	"cmd/compile/internal/big"
 	"fmt"
 	"math"
+	"math/big"
 )
 
 // implements float arithmetic
@@ -37,8 +37,15 @@ func newMpflt() *Mpflt {
 	return &a
 }
 
+func newMpcmplx() *Mpcplx {
+	var a Mpcplx
+	a.Real = *newMpflt()
+	a.Imag = *newMpflt()
+	return &a
+}
+
 func (a *Mpflt) SetInt(b *Mpint) {
-	if b.Ovf {
+	if b.checkOverflow(0) {
 		// sign doesn't really matter but copy anyway
 		a.Val.SetInf(b.Val.Sign() < 0)
 		return
@@ -128,7 +135,7 @@ func (a *Mpflt) Float64() float64 {
 
 	// check for overflow
 	if math.IsInf(x, 0) && nsavederrors+nerrors == 0 {
-		Yyerror("mpgetflt ovf")
+		Fatalf("ovf in Mpflt Float64")
 	}
 
 	return x + 0 // avoid -0 (should not be needed, but be conservative)
@@ -140,7 +147,7 @@ func (a *Mpflt) Float32() float64 {
 
 	// check for overflow
 	if math.IsInf(x, 0) && nsavederrors+nerrors == 0 {
-		Yyerror("mpgetflt32 ovf")
+		Fatalf("ovf in Mpflt Float32")
 	}
 
 	return x + 0 // avoid -0 (should not be needed, but be conservative)
@@ -169,31 +176,20 @@ func (a *Mpflt) Neg() {
 	}
 }
 
-//
-// floating point input
-// required syntax is [+-]d*[.]d*[e[+-]d*] or [+-]0xH*[e[+-]d*]
-//
 func (a *Mpflt) SetString(as string) {
 	for len(as) > 0 && (as[0] == ' ' || as[0] == '\t') {
 		as = as[1:]
 	}
 
-	f, ok := a.Val.SetString(as)
-	if !ok {
-		// At the moment we lose precise error cause;
-		// the old code additionally distinguished between:
-		// - malformed hex constant
-		// - decimal point in hex constant
-		// - constant exponent out of range
-		// - decimal point and binary point in constant
-		// TODO(gri) use different conversion function or check separately
-		Yyerror("malformed constant: %s", as)
+	f, _, err := a.Val.Parse(as, 10)
+	if err != nil {
+		yyerror("malformed constant: %s (%v)", as, err)
 		a.Val.SetFloat64(0)
 		return
 	}
 
 	if f.IsInf() {
-		Yyerror("constant too large: %s", as)
+		yyerror("constant too large: %s", as)
 		a.Val.SetFloat64(0)
 		return
 	}
@@ -266,4 +262,75 @@ func fconv(fvp *Mpflt, flag FmtFlag) string {
 	}
 
 	return fmt.Sprintf("%s%.6ge%+d", sign, m, e)
+}
+
+// complex multiply v *= rv
+//	(a, b) * (c, d) = (a*c - b*d, b*c + a*d)
+func (v *Mpcplx) Mul(rv *Mpcplx) {
+	var ac, ad, bc, bd Mpflt
+
+	ac.Set(&v.Real)
+	ac.Mul(&rv.Real) // ac
+
+	bd.Set(&v.Imag)
+	bd.Mul(&rv.Imag) // bd
+
+	bc.Set(&v.Imag)
+	bc.Mul(&rv.Real) // bc
+
+	ad.Set(&v.Real)
+	ad.Mul(&rv.Imag) // ad
+
+	v.Real.Set(&ac)
+	v.Real.Sub(&bd) // ac-bd
+
+	v.Imag.Set(&bc)
+	v.Imag.Add(&ad) // bc+ad
+}
+
+// complex divide v /= rv
+//	(a, b) / (c, d) = ((a*c + b*d), (b*c - a*d))/(c*c + d*d)
+func (v *Mpcplx) Div(rv *Mpcplx) bool {
+	if rv.Real.CmpFloat64(0) == 0 && rv.Imag.CmpFloat64(0) == 0 {
+		return false
+	}
+
+	var ac, ad, bc, bd, cc_plus_dd Mpflt
+
+	cc_plus_dd.Set(&rv.Real)
+	cc_plus_dd.Mul(&rv.Real) // cc
+
+	ac.Set(&rv.Imag)
+	ac.Mul(&rv.Imag)    // dd
+	cc_plus_dd.Add(&ac) // cc+dd
+
+	// We already checked that c and d are not both zero, but we can't
+	// assume that c²+d² != 0 follows, because for tiny values of c
+	// and/or d c²+d² can underflow to zero.  Check that c²+d² is
+	// nonzero, return if it's not.
+	if cc_plus_dd.CmpFloat64(0) == 0 {
+		return false
+	}
+
+	ac.Set(&v.Real)
+	ac.Mul(&rv.Real) // ac
+
+	bd.Set(&v.Imag)
+	bd.Mul(&rv.Imag) // bd
+
+	bc.Set(&v.Imag)
+	bc.Mul(&rv.Real) // bc
+
+	ad.Set(&v.Real)
+	ad.Mul(&rv.Imag) // ad
+
+	v.Real.Set(&ac)
+	v.Real.Add(&bd)         // ac+bd
+	v.Real.Quo(&cc_plus_dd) // (ac+bd)/(cc+dd)
+
+	v.Imag.Set(&bc)
+	v.Imag.Sub(&ad)         // bc-ad
+	v.Imag.Quo(&cc_plus_dd) // (bc+ad)/(cc+dd)
+
+	return true
 }

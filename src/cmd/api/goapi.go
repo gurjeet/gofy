@@ -27,6 +27,18 @@ import (
 	"strings"
 )
 
+func goCmd() string {
+	var exeSuffix string
+	if runtime.GOOS == "windows" {
+		exeSuffix = ".exe"
+	}
+	path := filepath.Join(runtime.GOROOT(), "bin", "go"+exeSuffix)
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	return "go"
+}
+
 // Flags
 var (
 	checkFile  = flag.String("c", "", "optional comma-separated filename(s) to check API against")
@@ -127,7 +139,7 @@ func main() {
 	if flag.NArg() > 0 {
 		pkgNames = flag.Args()
 	} else {
-		stds, err := exec.Command("go", "list", "std").Output()
+		stds, err := exec.Command(goCmd(), "list", "std").Output()
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -425,7 +437,7 @@ func (w *Walker) Import(name string) (*types.Package, error) {
 	w.imported[name] = &importing
 
 	root := w.root
-	if strings.HasPrefix(name, "golang.org/x/") {
+	if strings.HasPrefix(name, "golang_org/x/") {
 		root = filepath.Join(root, "vendor")
 	}
 

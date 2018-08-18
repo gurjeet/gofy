@@ -11,7 +11,9 @@ const (
 	ARM
 	ARM64
 	I386
+	MIPS
 	MIPS64
 	PPC64
 	S390X
+	WASM
 )

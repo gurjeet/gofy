@@ -9,6 +9,7 @@ import "unsafe"
 const memDebug = false
 
 var bloc uintptr
+var blocMax uintptr
 var memlock mutex
 
 type memHdr struct {
@@ -38,7 +39,7 @@ func memAlloc(n uintptr) unsafe.Pointer {
 				p.size -= n
 				p = (*memHdr)(add(unsafe.Pointer(p), p.size))
 			}
-			memclr(unsafe.Pointer(p), unsafe.Sizeof(memHdr{}))
+			*p = memHdr{}
 			return unsafe.Pointer(p)
 		}
 		prevp = p
@@ -48,7 +49,7 @@ func memAlloc(n uintptr) unsafe.Pointer {
 
 func memFree(ap unsafe.Pointer, n uintptr) {
 	n = memRound(n)
-	memclr(ap, n)
+	memclrNoHeapPointers(ap, n)
 	bp := (*memHdr)(ap)
 	bp.size = n
 	bpn := uintptr(ap)
@@ -63,7 +64,7 @@ func memFree(ap unsafe.Pointer, n uintptr) {
 		if bpn+bp.size == uintptr(unsafe.Pointer(p)) {
 			bp.size += p.size
 			bp.next = p.next
-			memclr(unsafe.Pointer(p), unsafe.Sizeof(memHdr{}))
+			*p = memHdr{}
 		} else {
 			bp.next.set(p)
 		}
@@ -77,14 +78,14 @@ func memFree(ap unsafe.Pointer, n uintptr) {
 	if bpn+bp.size == uintptr(unsafe.Pointer(p.next)) {
 		bp.size += p.next.ptr().size
 		bp.next = p.next.ptr().next
-		memclr(unsafe.Pointer(p.next), unsafe.Sizeof(memHdr{}))
+		*p.next.ptr() = memHdr{}
 	} else {
 		bp.next = p.next
 	}
 	if uintptr(unsafe.Pointer(p))+p.size == bpn {
 		p.size += bp.size
 		p.next = bp.next
-		memclr(unsafe.Pointer(bp), unsafe.Sizeof(memHdr{}))
+		*bp = memHdr{}
 	} else {
 		p.next.set(bp)
 	}
@@ -122,14 +123,18 @@ func memRound(p uintptr) uintptr {
 
 func initBloc() {
 	bloc = memRound(firstmoduledata.end)
+	blocMax = bloc
 }
 
 func sbrk(n uintptr) unsafe.Pointer {
 	// Plan 9 sbrk from /sys/src/libc/9sys/sbrk.c
 	bl := bloc
 	n = memRound(n)
-	if brk_(unsafe.Pointer(bl+n)) < 0 {
-		return nil
+	if bl+n > blocMax {
+		if brk_(unsafe.Pointer(bl+n)) < 0 {
+			return nil
+		}
+		blocMax = bl + n
 	}
 	bloc += n
 	return unsafe.Pointer(bl)
@@ -149,8 +154,16 @@ func sysAlloc(n uintptr, sysStat *uint64) unsafe.Pointer {
 func sysFree(v unsafe.Pointer, n uintptr, sysStat *uint64) {
 	mSysStatDec(sysStat, n)
 	lock(&memlock)
-	memFree(v, n)
-	memCheck()
+	if uintptr(v)+n == bloc {
+		// Address range being freed is at the end of memory,
+		// so record a new lower value for end of memory.
+		// Can't actually shrink address space because segment is shared.
+		memclrNoHeapPointers(v, n)
+		bloc -= n
+	} else {
+		memFree(v, n)
+		memCheck()
+	}
 	unlock(&memlock)
 }
 
@@ -160,7 +173,7 @@ func sysUnused(v unsafe.Pointer, n uintptr) {
 func sysUsed(v unsafe.Pointer, n uintptr) {
 }
 
-func sysMap(v unsafe.Pointer, n uintptr, reserved bool, sysStat *uint64) {
+func sysMap(v unsafe.Pointer, n uintptr, sysStat *uint64) {
 	// sysReserve has already allocated all heap memory,
 	// but has not adjusted stats.
 	mSysStatInc(sysStat, n)
@@ -169,11 +182,18 @@ func sysMap(v unsafe.Pointer, n uintptr, reserved bool, sysStat *uint64) {
 func sysFault(v unsafe.Pointer, n uintptr) {
 }
 
-func sysReserve(v unsafe.Pointer, n uintptr, reserved *bool) unsafe.Pointer {
-	*reserved = true
+func sysReserve(v unsafe.Pointer, n uintptr) unsafe.Pointer {
 	lock(&memlock)
-	p := memAlloc(n)
-	memCheck()
+	var p unsafe.Pointer
+	if uintptr(v) == bloc {
+		// Address hint is the current end of memory,
+		// so try to extend the address space.
+		p = sbrk(n)
+	}
+	if p == nil {
+		p = memAlloc(n)
+		memCheck()
+	}
 	unlock(&memlock)
 	return p
 }

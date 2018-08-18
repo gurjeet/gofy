@@ -27,7 +27,7 @@ import (
 )
 
 // FIPS 198-1:
-// http://csrc.nist.gov/publications/fips/fips198-1/FIPS-198-1_final.pdf
+// https://csrc.nist.gov/publications/fips/fips198-1/FIPS-198-1_final.pdf
 
 // key is zero padded to the block size of the hash function
 // ipad = 0x36 byte repeated for key length
@@ -64,6 +64,9 @@ func (h *hmac) Reset() {
 }
 
 // New returns a new HMAC hash using the given hash.Hash type and key.
+// Note that unlike other hash implementations in the standard library,
+// the returned Hash does not implement encoding.BinaryMarshaler
+// or encoding.BinaryUnmarshaler.
 func New(h func() hash.Hash, key []byte) hash.Hash {
 	hm := new(hmac)
 	hm.outer = h()
@@ -94,5 +97,5 @@ func Equal(mac1, mac2 []byte) bool {
 	// We don't have to be constant time if the lengths of the MACs are
 	// different as that suggests that a completely different hash function
 	// was used.
-	return len(mac1) == len(mac2) && subtle.ConstantTimeCompare(mac1, mac2) == 1
+	return subtle.ConstantTimeCompare(mac1, mac2) == 1
 }

@@ -244,10 +244,9 @@ type Msghdr struct {
 }
 
 type Cmsghdr struct {
-	Len          uint64
-	Level        int32
-	Type         int32
-	X__cmsg_data [0]uint8
+	Len   uint64
+	Level int32
+	Type  int32
 }
 
 type Inet4Pktinfo struct {
@@ -584,6 +583,7 @@ const (
 	_AT_FDCWD            = -0x64
 	_AT_REMOVEDIR        = 0x200
 	_AT_SYMLINK_NOFOLLOW = 0x100
+	_AT_EACCESS          = 0x200
 )
 
 type Termios struct {
@@ -601,7 +601,7 @@ type Termios struct {
 const (
 	IUCLC  = 0x1000
 	OLCUC  = 0x4
-	TCGETS = 0x403c7413
-	TCSETS = 0x803c7414
+	TCGETS = 0x402c7413
+	TCSETS = 0x802c7414
 	XCASE  = 0x4000
 )

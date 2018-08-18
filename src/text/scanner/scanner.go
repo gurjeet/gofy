@@ -37,14 +37,11 @@ func (pos *Position) IsValid() bool { return pos.Line > 0 }
 
 func (pos Position) String() string {
 	s := pos.Filename
-	if pos.IsValid() {
-		if s != "" {
-			s += ":"
-		}
-		s += fmt.Sprintf("%d:%d", pos.Line, pos.Column)
-	}
 	if s == "" {
-		s = "???"
+		s = "<input>"
+	}
+	if pos.IsValid() {
+		s += fmt.Sprintf(":%d:%d", pos.Line, pos.Column)
 	}
 	return s
 }
@@ -169,7 +166,8 @@ type Scanner struct {
 	// The Filename field is always left untouched by the Scanner.
 	// If an error is reported (via Error) and Position is invalid,
 	// the scanner is not inside a token. Call Pos to obtain an error
-	// position in that case.
+	// position in that case, or to obtain the position immediately
+	// after the most recently scanned token.
 	Position
 }
 
@@ -333,7 +331,7 @@ func (s *Scanner) error(msg string) {
 	if !pos.IsValid() {
 		pos = s.Pos()
 	}
-	fmt.Fprintf(os.Stderr, "text/scanner: %s: %s\n", pos, msg)
+	fmt.Fprintf(os.Stderr, "%s: %s\n", pos, msg)
 }
 
 func (s *Scanner) isIdentRune(ch rune, i int) bool {
@@ -623,7 +621,7 @@ redo:
 		case '`':
 			if s.Mode&ScanRawStrings != 0 {
 				s.scanRawString()
-				tok = String
+				tok = RawString
 			}
 			ch = s.next()
 		default:
@@ -640,6 +638,8 @@ redo:
 
 // Pos returns the position of the character immediately after
 // the character or token returned by the last call to Next or Scan.
+// Use the Scanner's Position field for the start position of the most
+// recently scanned token.
 func (s *Scanner) Pos() (pos Position) {
 	pos.Filename = s.Filename
 	pos.Offset = s.srcBufOffset + s.srcPos - s.lastCharLen

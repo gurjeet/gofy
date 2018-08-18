@@ -33,7 +33,7 @@ func nacl_thread_create(fn uintptr, stk, tls, xx unsafe.Pointer) int32
 //go:noescape
 func nacl_nanosleep(ts, extra *timespec) int32
 func nanotime() int64
-func mmap(addr unsafe.Pointer, n uintptr, prot, flags, fd int32, off uint32) unsafe.Pointer
+func mmap(addr unsafe.Pointer, n uintptr, prot, flags, fd int32, off uint32) (p unsafe.Pointer, err int)
 func exit(code int32)
 func osyield()
 
@@ -45,7 +45,7 @@ func os_sigpipe() {
 	throw("too many writes on closed pipe")
 }
 
-func dieFromSignal(sig int32) {
+func dieFromSignal(sig uint32) {
 	exit(2)
 }
 
@@ -60,7 +60,7 @@ func sigpanic() {
 	panicmem()
 }
 
-func raiseproc(sig int32) {
+func raiseproc(sig uint32) {
 }
 
 // Stubs so tests can link correctly. These should never be called.
@@ -85,6 +85,11 @@ func msigsave(mp *m) {
 
 //go:nosplit
 func msigrestore(sigmask sigset) {
+}
+
+//go:nosplit
+//go:nowritebarrierrec
+func clearSignalHandlers() {
 }
 
 //go:nosplit
@@ -116,6 +121,7 @@ func osinit() {
 	ncpu = 1
 	getg().m.procid = 2
 	//nacl_exception_handler(funcPC(sigtramp), nil);
+	physPageSize = 65536
 }
 
 func signame(sig uint32) string {
@@ -125,6 +131,7 @@ func signame(sig uint32) string {
 	return sigtable[sig].name
 }
 
+//go:nosplit
 func crash() {
 	*(*int32)(nil) = 0
 }
@@ -152,7 +159,8 @@ func mstart_nacl()
 
 // May run with m.p==nil, so write barriers are not allowed.
 //go:nowritebarrier
-func newosproc(mp *m, stk unsafe.Pointer) {
+func newosproc(mp *m) {
+	stk := unsafe.Pointer(mp.g0.stack.hi)
 	mp.tls[0] = uintptr(unsafe.Pointer(mp.g0))
 	mp.tls[1] = uintptr(unsafe.Pointer(mp))
 	ret := nacl_thread_create(funcPC(mstart_nacl), stk, unsafe.Pointer(&mp.tls[2]), nil)
@@ -161,6 +169,9 @@ func newosproc(mp *m, stk unsafe.Pointer) {
 		throw("newosproc")
 	}
 }
+
+//go:noescape
+func exitThread(wait *uint32)
 
 //go:nosplit
 func semacreate(mp *m) {
@@ -237,23 +248,19 @@ func semawakeup(mp *m) {
 	})
 }
 
-func memlimit() uintptr {
-	return 0
-}
-
 // This runs on a foreign stack, without an m or a g. No stack split.
 //go:nosplit
 //go:norace
 //go:nowritebarrierrec
 func badsignal(sig uintptr) {
-	cgocallback(unsafe.Pointer(funcPC(badsignalgo)), noescape(unsafe.Pointer(&sig)), unsafe.Sizeof(sig))
+	cgocallback(unsafe.Pointer(funcPC(badsignalgo)), noescape(unsafe.Pointer(&sig)), unsafe.Sizeof(sig), 0)
 }
 
 func badsignalgo(sig uintptr) {
 	if !sigsend(uint32(sig)) {
 		// A foreign thread received the signal sig, and the
 		// Go code does not want to handle it.
-		raisebadsignal(int32(sig))
+		raisebadsignal(uint32(sig))
 	}
 }
 
@@ -266,19 +273,32 @@ func badsignal2() {
 
 var badsignal1 = []byte("runtime: signal received on thread not created by Go.\n")
 
-func raisebadsignal(sig int32) {
+func raisebadsignal(sig uint32) {
 	badsignal2()
 }
 
 func madvise(addr unsafe.Pointer, n uintptr, flags int32) {}
 func munmap(addr unsafe.Pointer, n uintptr)               {}
-func resetcpuprofiler(hz int32)                           {}
+func setProcessCPUProfiler(hz int32)                      {}
+func setThreadCPUProfiler(hz int32)                       {}
 func sigdisable(uint32)                                   {}
 func sigenable(uint32)                                    {}
 func sigignore(uint32)                                    {}
 func closeonexec(int32)                                   {}
 
+// gsignalStack is unused on nacl.
+type gsignalStack struct{}
+
 var writelock uint32 // test-and-set spin lock for write
+
+// lastfaketime stores the last faketime value written to fd 1 or 2.
+var lastfaketime int64
+
+// lastfaketimefd stores the fd to which lastfaketime was written.
+//
+// Subsequent writes to the same fd may use the same timestamp,
+// but the timestamp must increase if the fd changes.
+var lastfaketimefd int32
 
 /*
 An attempt at IRT. Doesn't work. See end of sys_nacl_amd64.s.

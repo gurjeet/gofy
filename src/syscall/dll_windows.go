@@ -87,7 +87,6 @@ func (d *DLL) FindProc(name string) (proc *Proc, err error) {
 		return nil, err
 	}
 	a, e := getprocaddress(uintptr(d.Handle), namep)
-	use(unsafe.Pointer(namep))
 	if e != 0 {
 		return nil, &DLLError{
 			Err:     e,
@@ -129,6 +128,8 @@ type Proc struct {
 func (p *Proc) Addr() uintptr {
 	return p.addr
 }
+
+//go:uintptrescapes
 
 // Call executes procedure p with arguments a. It will panic, if more than 15 arguments
 // are supplied.
@@ -174,7 +175,6 @@ func (p *Proc) Call(a ...uintptr) (r1, r2 uintptr, lastErr error) {
 	default:
 		panic("Call " + p.Name + " with too many arguments " + itoa(len(a)) + ".")
 	}
-	return
 }
 
 // A LazyDLL implements access to a single DLL.
@@ -287,6 +287,8 @@ func (p *LazyProc) Addr() uintptr {
 	p.mustFind()
 	return p.proc.Addr()
 }
+
+//go:uintptrescapes
 
 // Call executes procedure p with arguments a. It will panic, if more than 15 arguments
 // are supplied.

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build darwin dragonfly freebsd linux nacl netbsd openbsd solaris windows
+// +build darwin dragonfly freebsd js,wasm linux nacl netbsd openbsd solaris windows
 
 package net
 
@@ -13,7 +13,7 @@ import (
 	"syscall"
 )
 
-func unixSocket(ctx context.Context, net string, laddr, raddr sockaddr, mode string) (*netFD, error) {
+func unixSocket(ctx context.Context, net string, laddr, raddr sockaddr, mode string, ctrlFn func(string, string, syscall.RawConn) error) (*netFD, error) {
 	var sotype int
 	switch net {
 	case "unix":
@@ -42,7 +42,7 @@ func unixSocket(ctx context.Context, net string, laddr, raddr sockaddr, mode str
 		return nil, errors.New("unknown mode: " + mode)
 	}
 
-	fd, err := socket(ctx, net, syscall.AF_UNIX, sotype, 0, false, laddr, raddr)
+	fd, err := socket(ctx, net, syscall.AF_UNIX, sotype, 0, false, laddr, raddr, ctrlFn)
 	if err != nil {
 		return nil, err
 	}
@@ -92,6 +92,10 @@ func (a *UnixAddr) sockaddr(family int) (syscall.Sockaddr, error) {
 		return nil, nil
 	}
 	return &syscall.SockaddrUnix{Name: a.Name}, nil
+}
+
+func (a *UnixAddr) toLocal(net string) sockaddr {
+	return a
 }
 
 func (c *UnixConn) readFrom(b []byte) (int, *UnixAddr, error) {
@@ -146,8 +150,8 @@ func (c *UnixConn) writeMsg(b, oob []byte, addr *UnixAddr) (n, oobn int, err err
 	return c.fd.writeMsg(b, oob, sa)
 }
 
-func dialUnix(ctx context.Context, net string, laddr, raddr *UnixAddr) (*UnixConn, error) {
-	fd, err := unixSocket(ctx, net, laddr, raddr, "dial")
+func (sd *sysDialer) dialUnix(ctx context.Context, laddr, raddr *UnixAddr) (*UnixConn, error) {
+	fd, err := unixSocket(ctx, sd.network, laddr, raddr, "dial", sd.Dialer.Control)
 	if err != nil {
 		return nil, err
 	}
@@ -173,9 +177,12 @@ func (ln *UnixListener) close() error {
 	// is at least compatible with the auto-remove
 	// sequence in ListenUnix. It's only non-Go
 	// programs that can mess us up.
-	if ln.path[0] != '@' && ln.unlink {
-		syscall.Unlink(ln.path)
-	}
+	// Even if there are racy calls to Close, we want to unlink only for the first one.
+	ln.unlinkOnce.Do(func() {
+		if ln.path[0] != '@' && ln.unlink {
+			syscall.Unlink(ln.path)
+		}
+	})
 	return ln.fd.Close()
 }
 
@@ -187,16 +194,28 @@ func (ln *UnixListener) file() (*os.File, error) {
 	return f, nil
 }
 
-func listenUnix(ctx context.Context, network string, laddr *UnixAddr) (*UnixListener, error) {
-	fd, err := unixSocket(ctx, network, laddr, nil, "listen")
+// SetUnlinkOnClose sets whether the underlying socket file should be removed
+// from the file system when the listener is closed.
+//
+// The default behavior is to unlink the socket file only when package net created it.
+// That is, when the listener and the underlying socket file were created by a call to
+// Listen or ListenUnix, then by default closing the listener will remove the socket file.
+// but if the listener was created by a call to FileListener to use an already existing
+// socket file, then by default closing the listener will not remove the socket file.
+func (l *UnixListener) SetUnlinkOnClose(unlink bool) {
+	l.unlink = unlink
+}
+
+func (sl *sysListener) listenUnix(ctx context.Context, laddr *UnixAddr) (*UnixListener, error) {
+	fd, err := unixSocket(ctx, sl.network, laddr, nil, "listen", sl.ListenConfig.Control)
 	if err != nil {
 		return nil, err
 	}
 	return &UnixListener{fd: fd, path: fd.laddr.String(), unlink: true}, nil
 }
 
-func listenUnixgram(ctx context.Context, network string, laddr *UnixAddr) (*UnixConn, error) {
-	fd, err := unixSocket(ctx, network, laddr, nil, "listen")
+func (sl *sysListener) listenUnixgram(ctx context.Context, laddr *UnixAddr) (*UnixConn, error) {
+	fd, err := unixSocket(ctx, sl.network, laddr, nil, "listen", sl.ListenConfig.Control)
 	if err != nil {
 		return nil, err
 	}

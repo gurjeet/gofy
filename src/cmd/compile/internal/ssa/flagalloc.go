@@ -4,8 +4,6 @@
 
 package ssa
 
-const flagRegMask = regMask(1) << 33 // TODO: arch-specific
-
 // flagalloc allocates the flag register among all the flag-generating
 // instructions. Flag values are recomputed if they need to be
 // spilled/restored.
@@ -13,14 +11,10 @@ func flagalloc(f *Func) {
 	// Compute the in-register flag value we want at the end of
 	// each block. This is basically a best-effort live variable
 	// analysis, so it can be much simpler than a full analysis.
-	// TODO: do we really need to keep flag values live across blocks?
-	// Could we force the flags register to be unused at basic block
-	// boundaries?  Then we wouldn't need this computation.
 	end := make([]*Value, f.NumBlocks())
+	po := f.postorder()
 	for n := 0; n < 2; n++ {
-		// Walk blocks backwards. Poor-man's postorder traversal.
-		for i := len(f.Blocks) - 1; i >= 0; i-- {
-			b := f.Blocks[i]
+		for _, b := range po {
 			// Walk values backwards to figure out what flag
 			// value we want in the flag register at the start
 			// of the block.
@@ -33,7 +27,7 @@ func flagalloc(f *Func) {
 				if v == flag {
 					flag = nil
 				}
-				if opcodeTable[v.Op].reg.clobbers&flagRegMask != 0 {
+				if v.clobbersFlags() {
 					flag = nil
 				}
 				for _, a := range v.Args {
@@ -65,13 +59,47 @@ func flagalloc(f *Func) {
 		}
 	}
 
-	// Add flag recomputations where they are needed.
+	// Compute which flags values will need to be spilled.
+	spill := map[ID]bool{}
+	for _, b := range f.Blocks {
+		var flag *Value
+		if len(b.Preds) > 0 {
+			flag = end[b.Preds[0].b.ID]
+		}
+		for _, v := range b.Values {
+			for _, a := range v.Args {
+				if !a.Type.IsFlags() {
+					continue
+				}
+				if a == flag {
+					continue
+				}
+				// a will need to be restored here.
+				spill[a.ID] = true
+				flag = a
+			}
+			if v.clobbersFlags() {
+				flag = nil
+			}
+			if v.Type.IsFlags() {
+				flag = v
+			}
+		}
+		if v := b.Control; v != nil && v != flag && v.Type.IsFlags() {
+			spill[v.ID] = true
+		}
+		if v := end[b.ID]; v != nil && v != flag {
+			spill[v.ID] = true
+		}
+	}
+
+	// Add flag spill and recomputation where they are needed.
 	// TODO: Remove original instructions if they are never used.
 	var oldSched []*Value
 	for _, b := range f.Blocks {
 		oldSched = append(oldSched[:0], b.Values...)
 		b.Values = b.Values[:0]
-		// The current live flag value the pre-flagalloc copy).
+		// The current live flag value (the pre-flagalloc copy).
 		var flag *Value
 		if len(b.Preds) > 0 {
 			flag = end[b.Preds[0].b.ID]
@@ -87,6 +115,72 @@ func flagalloc(f *Func) {
 			if v.Op == OpPhi && v.Type.IsFlags() {
 				f.Fatalf("phi of flags not supported: %s", v.LongString())
 			}
+
+			// If v will be spilled, and v uses memory, then we must split it
+			// into a load + a flag generator.
+			// TODO: figure out how to do this without arch-dependent code.
+			if spill[v.ID] && v.MemoryArg() != nil {
+				switch v.Op {
+				case OpAMD64CMPQload:
+					load := b.NewValue2IA(v.Pos, OpAMD64MOVQload, f.Config.Types.UInt64, v.AuxInt, v.Aux, v.Args[0], v.Args[2])
+					v.Op = OpAMD64CMPQ
+					v.AuxInt = 0
+					v.Aux = nil
+					v.SetArgs2(load, v.Args[1])
+				case OpAMD64CMPLload:
+					load := b.NewValue2IA(v.Pos, OpAMD64MOVLload, f.Config.Types.UInt32, v.AuxInt, v.Aux, v.Args[0], v.Args[2])
+					v.Op = OpAMD64CMPL
+					v.AuxInt = 0
+					v.Aux = nil
+					v.SetArgs2(load, v.Args[1])
+				case OpAMD64CMPWload:
+					load := b.NewValue2IA(v.Pos, OpAMD64MOVWload, f.Config.Types.UInt16, v.AuxInt, v.Aux, v.Args[0], v.Args[2])
+					v.Op = OpAMD64CMPW
+					v.AuxInt = 0
+					v.Aux = nil
+					v.SetArgs2(load, v.Args[1])
+				case OpAMD64CMPBload:
+					load := b.NewValue2IA(v.Pos, OpAMD64MOVBload, f.Config.Types.UInt8, v.AuxInt, v.Aux, v.Args[0], v.Args[2])
+					v.Op = OpAMD64CMPB
+					v.AuxInt = 0
+					v.Aux = nil
+					v.SetArgs2(load, v.Args[1])
+
+				case OpAMD64CMPQconstload:
+					vo := v.AuxValAndOff()
+					load := b.NewValue2IA(v.Pos, OpAMD64MOVQload, f.Config.Types.UInt64, vo.Off(), v.Aux, v.Args[0], v.Args[1])
+					v.Op = OpAMD64CMPQconst
+					v.AuxInt = vo.Val()
+					v.Aux = nil
+					v.SetArgs1(load)
+				case OpAMD64CMPLconstload:
+					vo := v.AuxValAndOff()
+					load := b.NewValue2IA(v.Pos, OpAMD64MOVLload, f.Config.Types.UInt32, vo.Off(), v.Aux, v.Args[0], v.Args[1])
+					v.Op = OpAMD64CMPLconst
+					v.AuxInt = vo.Val()
+					v.Aux = nil
+					v.SetArgs1(load)
+				case OpAMD64CMPWconstload:
+					vo := v.AuxValAndOff()
+					load := b.NewValue2IA(v.Pos, OpAMD64MOVWload, f.Config.Types.UInt16, vo.Off(), v.Aux, v.Args[0], v.Args[1])
+					v.Op = OpAMD64CMPWconst
+					v.AuxInt = vo.Val()
+					v.Aux = nil
+					v.SetArgs1(load)
+				case OpAMD64CMPBconstload:
+					vo := v.AuxValAndOff()
+					load := b.NewValue2IA(v.Pos, OpAMD64MOVBload, f.Config.Types.UInt8, vo.Off(), v.Aux, v.Args[0], v.Args[1])
+					v.Op = OpAMD64CMPBconst
+					v.AuxInt = vo.Val()
+					v.Aux = nil
+					v.SetArgs1(load)
+
+				default:
+					f.Fatalf("can't split flag generator: %s", v.LongString())
+				}
+
+			}
+
 			// Make sure any flag arg of v is in the flags register.
 			// If not, recompute it.
 			for i, a := range v.Args {
@@ -97,7 +191,7 @@ func flagalloc(f *Func) {
 					continue
 				}
 				// Recalculate a
-				c := a.copyInto(b)
+				c := copyFlags(a, b)
 				// Update v.
 				v.SetArg(i, c)
 				// Remember the most-recently computed flag value.
@@ -105,7 +199,7 @@ func flagalloc(f *Func) {
 			}
 			// Issue v.
 			b.Values = append(b.Values, v)
-			if opcodeTable[v.Op].reg.clobbers&flagRegMask != 0 {
+			if v.clobbersFlags() {
 				flag = nil
 			}
 			if v.Type.IsFlags() {
@@ -114,14 +208,14 @@ func flagalloc(f *Func) {
 		}
 		if v := b.Control; v != nil && v != flag && v.Type.IsFlags() {
 			// Recalculate control value.
-			c := v.copyInto(b)
+			c := copyFlags(v, b)
 			b.SetControl(c)
 			flag = v
 		}
 		if v := end[b.ID]; v != nil && v != flag {
 			// Need to reissue flag generator for use by
 			// subsequent blocks.
-			_ = v.copyInto(b)
+			copyFlags(v, b)
 			// Note: this flag generator is not properly linked up
 			// with the flag users. This breaks the SSA representation.
 			// We could fix up the users with another pass, but for now
@@ -134,4 +228,33 @@ func flagalloc(f *Func) {
 	for _, b := range f.Blocks {
 		b.FlagsLiveAtEnd = end[b.ID] != nil
 	}
+}
+
+func (v *Value) clobbersFlags() bool {
+	if opcodeTable[v.Op].clobberFlags {
+		return true
+	}
+	if v.Type.IsTuple() && (v.Type.FieldType(0).IsFlags() || v.Type.FieldType(1).IsFlags()) {
+		// This case handles the possibility where a flag value is generated but never used.
+		// In that case, there's no corresponding Select to overwrite the flags value,
+		// so we must consider flags clobbered by the tuple-generating instruction.
+		return true
+	}
+	return false
+}
+
+// copyFlags copies v (flag generator) into b, returns the copy.
+// If v's arg is also flags, copy recursively.
+func copyFlags(v *Value, b *Block) *Value {
+	flagsArgs := make(map[int]*Value)
+	for i, a := range v.Args {
+		if a.Type.IsFlags() || a.Type.IsTuple() {
+			flagsArgs[i] = copyFlags(a, b)
+		}
+	}
+	c := v.copyInto(b)
+	for i, a := range flagsArgs {
+		c.SetArg(i, a)
+	}
+	return c
 }

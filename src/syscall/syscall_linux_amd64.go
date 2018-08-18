@@ -5,8 +5,8 @@
 package syscall
 
 const (
-	_SYS_dup      = SYS_DUP2
-	_SYS_getdents = SYS_GETDENTS64
+	_SYS_dup       = SYS_DUP2
+	_SYS_setgroups = SYS_SETGROUPS
 )
 
 //sys	Dup2(oldfd int, newfd int) (err error)
@@ -39,7 +39,6 @@ const (
 //sysnb	Setreuid(ruid int, euid int) (err error)
 //sys	Shutdown(fd int, how int) (err error)
 //sys	Splice(rfd int, roff *int64, wfd int, woff *int64, len int, flags int) (n int64, err error)
-//sys	Stat(path string, stat *Stat_t) (err error)
 //sys	Statfs(path string, buf *Statfs_t) (err error)
 //sys	SyncFileRange(fd int, off int64, n int64, flags int) (err error)
 //sys	Truncate(path string, length int64) (err error)
@@ -47,6 +46,7 @@ const (
 //sys	accept4(s int, rsa *RawSockaddrAny, addrlen *_Socklen, flags int) (fd int, err error)
 //sys	bind(s int, addr unsafe.Pointer, addrlen _Socklen) (err error)
 //sys	connect(s int, addr unsafe.Pointer, addrlen _Socklen) (err error)
+//sys	fstatat(fd int, path string, stat *Stat_t, flags int) (err error) = SYS_NEWFSTATAT
 //sysnb	getgroups(n int, list *_Gid_t) (nn int, err error)
 //sysnb	setgroups(n int, list *_Gid_t) (err error)
 //sys	getsockopt(s int, level int, name int, val unsafe.Pointer, vallen *_Socklen) (err error)
@@ -60,6 +60,11 @@ const (
 //sys	recvmsg(s int, msg *Msghdr, flags int) (n int, err error)
 //sys	sendmsg(s int, msg *Msghdr, flags int) (n int, err error)
 //sys	mmap(addr uintptr, length uintptr, prot int, flags int, fd int, offset int64) (xaddr uintptr, err error)
+//sys	EpollWait(epfd int, events []EpollEvent, msec int) (n int, err error)
+
+func Stat(path string, stat *Stat_t) (err error) {
+	return fstatat(_AT_FDCWD, path, stat, 0)
+}
 
 //go:noescape
 func gettimeofday(tv *Timeval) (err Errno)
@@ -71,8 +76,6 @@ func Gettimeofday(tv *Timeval) (err error) {
 	}
 	return nil
 }
-
-func Getpagesize() int { return 4096 }
 
 func Time(t *Time_t) (tt Time_t, err error) {
 	var tv Timeval
@@ -86,21 +89,12 @@ func Time(t *Time_t) (tt Time_t, err error) {
 	return Time_t(tv.Sec), nil
 }
 
-func TimespecToNsec(ts Timespec) int64 { return int64(ts.Sec)*1e9 + int64(ts.Nsec) }
-
-func NsecToTimespec(nsec int64) (ts Timespec) {
-	ts.Sec = nsec / 1e9
-	ts.Nsec = nsec % 1e9
-	return
+func setTimespec(sec, nsec int64) Timespec {
+	return Timespec{Sec: sec, Nsec: nsec}
 }
 
-func TimevalToNsec(tv Timeval) int64 { return int64(tv.Sec)*1e9 + int64(tv.Usec)*1e3 }
-
-func NsecToTimeval(nsec int64) (tv Timeval) {
-	nsec += 999 // round up to microsecond
-	tv.Sec = nsec / 1e9
-	tv.Usec = nsec % 1e9 / 1e3
-	return
+func setTimeval(sec, usec int64) Timeval {
+	return Timeval{Sec: sec, Usec: usec}
 }
 
 //sysnb	pipe(p *[2]_C_int) (err error)
@@ -144,3 +138,5 @@ func (msghdr *Msghdr) SetControllen(length int) {
 func (cmsg *Cmsghdr) SetLen(length int) {
 	cmsg.Len = uint64(length)
 }
+
+func rawVforkSyscall(trap, a1 uintptr) (r1 uintptr, err Errno)

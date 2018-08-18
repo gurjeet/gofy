@@ -6,6 +6,7 @@ package http
 
 import (
 	"io"
+	"net/http/httptrace"
 	"net/textproto"
 	"sort"
 	"strings"
@@ -32,9 +33,11 @@ func (h Header) Set(key, value string) {
 }
 
 // Get gets the first value associated with the given key.
+// It is case insensitive; textproto.CanonicalMIMEHeaderKey is used
+// to canonicalize the provided key.
 // If there are no values associated with the key, Get returns "".
-// To access multiple values of a key, access the map directly
-// with CanonicalHeaderKey.
+// To access multiple values of a key, or to use non-canonical keys,
+// access the map directly.
 func (h Header) Get(key string) string {
 	return textproto.MIMEHeader(h).Get(key)
 }
@@ -54,7 +57,11 @@ func (h Header) Del(key string) {
 
 // Write writes a header in wire format.
 func (h Header) Write(w io.Writer) error {
-	return h.WriteSubset(w, nil)
+	return h.write(w, nil)
+}
+
+func (h Header) write(w io.Writer, trace *httptrace.ClientTrace) error {
+	return h.writeSubset(w, nil, trace)
 }
 
 func (h Header) clone() Header {
@@ -143,20 +150,33 @@ func (h Header) sortedKeyValues(exclude map[string]bool) (kvs []keyValues, hs *h
 // WriteSubset writes a header in wire format.
 // If exclude is not nil, keys where exclude[key] == true are not written.
 func (h Header) WriteSubset(w io.Writer, exclude map[string]bool) error {
+	return h.writeSubset(w, exclude, nil)
+}
+
+func (h Header) writeSubset(w io.Writer, exclude map[string]bool, trace *httptrace.ClientTrace) error {
 	ws, ok := w.(writeStringer)
 	if !ok {
 		ws = stringWriter{w}
 	}
 	kvs, sorter := h.sortedKeyValues(exclude)
+	var formattedVals []string
 	for _, kv := range kvs {
 		for _, v := range kv.values {
 			v = headerNewlineToSpace.Replace(v)
 			v = textproto.TrimString(v)
 			for _, s := range []string{kv.key, ": ", v, "\r\n"} {
 				if _, err := ws.WriteString(s); err != nil {
+					headerSorterPool.Put(sorter)
 					return err
 				}
 			}
+			if trace != nil && trace.WroteHeaderField != nil {
+				formattedVals = append(formattedVals, v)
+			}
+		}
+		if trace != nil && trace.WroteHeaderField != nil {
+			trace.WroteHeaderField(kv.key, formattedVals)
+			formattedVals = nil
 		}
 	}
 	headerSorterPool.Put(sorter)

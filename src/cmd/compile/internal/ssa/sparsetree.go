@@ -4,7 +4,10 @@
 
 package ssa
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 type SparseTreeNode struct {
 	child   *Block
@@ -65,6 +68,52 @@ func newSparseTree(f *Func, parentOf []*Block) SparseTree {
 	}
 	t.numberBlock(f.Entry, 1)
 	return t
+}
+
+// newSparseOrderedTree creates a SparseTree from a block-to-parent map (array indexed by Block.ID)
+// children will appear in the reverse of their order in reverseOrder
+// in particular, if reverseOrder is a dfs-reversePostOrder, then the root-to-children
+// walk of the tree will yield a pre-order.
+func newSparseOrderedTree(f *Func, parentOf, reverseOrder []*Block) SparseTree {
+	t := make(SparseTree, f.NumBlocks())
+	for _, b := range reverseOrder {
+		n := &t[b.ID]
+		if p := parentOf[b.ID]; p != nil {
+			n.parent = p
+			n.sibling = t[p.ID].child
+			t[p.ID].child = b
+		}
+	}
+	t.numberBlock(f.Entry, 1)
+	return t
+}
+
+// treestructure provides a string description of the dominator
+// tree and flow structure of block b and all blocks that it
+// dominates.
+func (t SparseTree) treestructure(b *Block) string {
+	return t.treestructure1(b, 0)
+}
+func (t SparseTree) treestructure1(b *Block, i int) string {
+	s := "\n" + strings.Repeat("\t", i) + b.String() + "->["
+	for i, e := range b.Succs {
+		if i > 0 {
+			s = s + ","
+		}
+		s = s + e.b.String()
+	}
+	s += "]"
+	if c0 := t[b.ID].child; c0 != nil {
+		s += "("
+		for c := c0; c != nil; c = t[c.ID].sibling {
+			if c != c0 {
+				s += " "
+			}
+			s += t.treestructure1(c, i+1)
+		}
+		s += ")"
+	}
+	return s
 }
 
 // numberBlock assigns entry and exit numbers for b and b's
@@ -149,8 +198,38 @@ func (t SparseTree) isAncestor(x, y *Block) bool {
 	return xx.entry < yy.entry && yy.exit < xx.exit
 }
 
-// maxdomorder returns a value to allow a maximal dominator first sort.  maxdomorder(x) < maxdomorder(y) is true
-// if x may dominate y, and false if x cannot dominate y.
-func (t SparseTree) maxdomorder(x *Block) int32 {
+// domorder returns a value for dominator-oriented sorting.
+// Block domination does not provide a total ordering,
+// but domorder two has useful properties.
+// (1) If domorder(x) > domorder(y) then x does not dominate y.
+// (2) If domorder(x) < domorder(y) and domorder(y) < domorder(z) and x does not dominate y,
+//     then x does not dominate z.
+// Property (1) means that blocks sorted by domorder always have a maximal dominant block first.
+// Property (2) allows searches for dominated blocks to exit early.
+func (t SparseTree) domorder(x *Block) int32 {
+	// Here is an argument that entry(x) provides the properties documented above.
+	//
+	// Entry and exit values are assigned in a depth-first dominator tree walk.
+	// For all blocks x and y, one of the following holds:
+	//
+	// (x-dom-y) x dominates y => entry(x) < entry(y) < exit(y) < exit(x)
+	// (y-dom-x) y dominates x => entry(y) < entry(x) < exit(x) < exit(y)
+	// (x-then-y) neither x nor y dominates the other and x walked before y => entry(x) < exit(x) < entry(y) < exit(y)
+	// (y-then-x) neither x nor y dominates the other and y walked before y => entry(y) < exit(y) < entry(x) < exit(x)
+	//
+	// entry(x) > entry(y) eliminates case x-dom-y. This provides property (1) above.
+	//
+	// For property (2), assume entry(x) < entry(y) and entry(y) < entry(z) and x does not dominate y.
+	// entry(x) < entry(y) allows cases x-dom-y and x-then-y.
+	// But by supposition, x does not dominate y. So we have x-then-y.
+	//
+	// For contractidion, assume x dominates z.
+	// Then entry(x) < entry(z) < exit(z) < exit(x).
+	// But we know x-then-y, so entry(x) < exit(x) < entry(y) < exit(y).
+	// Combining those, entry(x) < entry(z) < exit(z) < exit(x) < entry(y) < exit(y).
+	// By supposition, entry(y) < entry(z), which allows cases y-dom-z and y-then-z.
+	// y-dom-z requires entry(y) < entry(z), but we have entry(z) < entry(y).
+	// y-then-z requires exit(y) < entry(z), but we have entry(z) < exit(y).
+	// We have a contradiction, so x does not dominate z, as required.
 	return t[x.ID].entry
 }

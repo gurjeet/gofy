@@ -12,7 +12,6 @@ package net
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
-#include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 */
@@ -95,10 +94,14 @@ func cgoLookupPort(ctx context.Context, network, service string) (port int, err 
 }
 
 func cgoLookupServicePort(hints *C.struct_addrinfo, network, service string) (port int, err error) {
-	s := C.CString(service)
+	cservice := make([]byte, len(service)+1)
+	copy(cservice, service)
+	// Lowercase the C service name.
+	for i, b := range cservice[:len(service)] {
+		cservice[i] = lowerASCII(b)
+	}
 	var res *C.struct_addrinfo
-	defer C.free(unsafe.Pointer(s))
-	gerrno, err := C.getaddrinfo(nil, s, hints, &res)
+	gerrno, err := C.getaddrinfo(nil, (*C.char)(unsafe.Pointer(&cservice[0])), hints, &res)
 	if gerrno != 0 {
 		switch gerrno {
 		case C.EAI_SYSTEM:
@@ -140,10 +143,10 @@ func cgoLookupIPCNAME(name string) (addrs []IPAddr, cname string, err error) {
 	hints.ai_flags = cgoAddrInfoFlags
 	hints.ai_socktype = C.SOCK_STREAM
 
-	h := C.CString(name)
-	defer C.free(unsafe.Pointer(h))
+	h := make([]byte, len(name)+1)
+	copy(h, name)
 	var res *C.struct_addrinfo
-	gerrno, err := C.getaddrinfo(h, nil, &hints, &res)
+	gerrno, err := C.getaddrinfo((*C.char)(unsafe.Pointer(&h[0])), nil, &hints, &res)
 	if gerrno != 0 {
 		switch gerrno {
 		case C.EAI_SYSTEM:
@@ -187,7 +190,7 @@ func cgoLookupIPCNAME(name string) (addrs []IPAddr, cname string, err error) {
 			addrs = append(addrs, addr)
 		case C.AF_INET6:
 			sa := (*syscall.RawSockaddrInet6)(unsafe.Pointer(r.ai_addr))
-			addr := IPAddr{IP: copyIP(sa.Addr[:]), Zone: zoneToString(int(sa.Scope_id))}
+			addr := IPAddr{IP: copyIP(sa.Addr[:]), Zone: zoneCache.name(int(sa.Scope_id))}
 			addrs = append(addrs, addr)
 		}
 	}
@@ -246,7 +249,7 @@ func cgoLookupPTR(ctx context.Context, addr string) (names []string, err error, 
 	var zone string
 	ip := parseIPv4(addr)
 	if ip == nil {
-		ip, zone = parseIPv6(addr, true)
+		ip, zone = parseIPv6Zone(addr)
 	}
 	if ip == nil {
 		return nil, &DNSError{Err: "invalid address", Name: addr}, true
@@ -312,7 +315,7 @@ func cgoSockaddr(ip IP, zone string) (*C.struct_sockaddr, C.socklen_t) {
 		return cgoSockaddrInet4(ip4), C.socklen_t(syscall.SizeofSockaddrInet4)
 	}
 	if ip6 := ip.To16(); ip6 != nil {
-		return cgoSockaddrInet6(ip6, zoneToInt(zone)), C.socklen_t(syscall.SizeofSockaddrInet6)
+		return cgoSockaddrInet6(ip6, zoneCache.index(zone)), C.socklen_t(syscall.SizeofSockaddrInet6)
 	}
 	return nil, 0
 }

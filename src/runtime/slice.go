@@ -5,6 +5,7 @@
 package runtime
 
 import (
+	"runtime/internal/sys"
 	"unsafe"
 )
 
@@ -14,18 +15,25 @@ type slice struct {
 	cap   int
 }
 
+// An notInHeapSlice is a slice backed by go:notinheap memory.
+type notInHeapSlice struct {
+	array *notInHeap
+	len   int
+	cap   int
+}
+
 // maxElems is a lookup table containing the maximum capacity for a slice.
 // The index is the size of the slice element.
 var maxElems = [...]uintptr{
 	^uintptr(0),
-	_MaxMem / 1, _MaxMem / 2, _MaxMem / 3, _MaxMem / 4,
-	_MaxMem / 5, _MaxMem / 6, _MaxMem / 7, _MaxMem / 8,
-	_MaxMem / 9, _MaxMem / 10, _MaxMem / 11, _MaxMem / 12,
-	_MaxMem / 13, _MaxMem / 14, _MaxMem / 15, _MaxMem / 16,
-	_MaxMem / 17, _MaxMem / 18, _MaxMem / 19, _MaxMem / 20,
-	_MaxMem / 21, _MaxMem / 22, _MaxMem / 23, _MaxMem / 24,
-	_MaxMem / 25, _MaxMem / 26, _MaxMem / 27, _MaxMem / 28,
-	_MaxMem / 29, _MaxMem / 30, _MaxMem / 31, _MaxMem / 32,
+	maxAlloc / 1, maxAlloc / 2, maxAlloc / 3, maxAlloc / 4,
+	maxAlloc / 5, maxAlloc / 6, maxAlloc / 7, maxAlloc / 8,
+	maxAlloc / 9, maxAlloc / 10, maxAlloc / 11, maxAlloc / 12,
+	maxAlloc / 13, maxAlloc / 14, maxAlloc / 15, maxAlloc / 16,
+	maxAlloc / 17, maxAlloc / 18, maxAlloc / 19, maxAlloc / 20,
+	maxAlloc / 21, maxAlloc / 22, maxAlloc / 23, maxAlloc / 24,
+	maxAlloc / 25, maxAlloc / 26, maxAlloc / 27, maxAlloc / 28,
+	maxAlloc / 29, maxAlloc / 30, maxAlloc / 31, maxAlloc / 32,
 }
 
 // maxSliceCap returns the maximum capacity for a slice.
@@ -33,29 +41,48 @@ func maxSliceCap(elemsize uintptr) uintptr {
 	if elemsize < uintptr(len(maxElems)) {
 		return maxElems[elemsize]
 	}
-	return _MaxMem / elemsize
+	return maxAlloc / elemsize
 }
 
-// TODO: take uintptrs instead of int64s?
-func makeslice(et *_type, len64, cap64 int64) slice {
+func panicmakeslicelen() {
+	panic(errorString("makeslice: len out of range"))
+}
+
+func panicmakeslicecap() {
+	panic(errorString("makeslice: cap out of range"))
+}
+
+func makeslice(et *_type, len, cap int) slice {
 	// NOTE: The len > maxElements check here is not strictly necessary,
 	// but it produces a 'len out of range' error instead of a 'cap out of range' error
 	// when someone does make([]T, bignumber). 'cap out of range' is true too,
 	// but since the cap is only being supplied implicitly, saying len is clearer.
 	// See issue 4085.
 	maxElements := maxSliceCap(et.size)
-	len := int(len64)
-	if len64 < 0 || int64(len) != len64 || uintptr(len) > maxElements {
-		panic(errorString("makeslice: len out of range"))
+	if len < 0 || uintptr(len) > maxElements {
+		panicmakeslicelen()
 	}
 
-	cap := int(cap64)
-	if cap < len || int64(cap) != cap64 || uintptr(cap) > maxElements {
-		panic(errorString("makeslice: cap out of range"))
+	if cap < len || uintptr(cap) > maxElements {
+		panicmakeslicecap()
 	}
 
 	p := mallocgc(et.size*uintptr(cap), et, true)
 	return slice{p, len, cap}
+}
+
+func makeslice64(et *_type, len64, cap64 int64) slice {
+	len := int(len64)
+	if int64(len) != len64 {
+		panicmakeslicelen()
+	}
+
+	cap := int(cap64)
+	if int64(cap) != cap64 {
+		panicmakeslicecap()
+	}
+
+	return makeslice(et, len, cap)
 }
 
 // growslice handles slice growth during append.
@@ -70,7 +97,7 @@ func makeslice(et *_type, len64, cap64 int64) slice {
 // The SSA backend might prefer the new length or to return only ptr/cap and save stack space.
 func growslice(et *_type, old slice, cap int) slice {
 	if raceenabled {
-		callerpc := getcallerpc(unsafe.Pointer(&et))
+		callerpc := getcallerpc()
 		racereadrangepc(old.array, uintptr(old.len*int(et.size)), callerpc, funcPC(growslice))
 	}
 	if msanenabled {
@@ -94,30 +121,74 @@ func growslice(et *_type, old slice, cap int) slice {
 		if old.len < 1024 {
 			newcap = doublecap
 		} else {
-			for newcap < cap {
+			// Check 0 < newcap to detect overflow
+			// and prevent an infinite loop.
+			for 0 < newcap && newcap < cap {
 				newcap += newcap / 4
+			}
+			// Set newcap to the requested cap when
+			// the newcap calculation overflowed.
+			if newcap <= 0 {
+				newcap = cap
 			}
 		}
 	}
 
-	var lenmem, capmem uintptr
-	const ptrSize = unsafe.Sizeof((*byte)(nil))
-	switch et.size {
-	case 1:
+	var overflow bool
+	var lenmem, newlenmem, capmem uintptr
+	// Specialize for common values of et.size.
+	// For 1 we don't need any division/multiplication.
+	// For sys.PtrSize, compiler will optimize division/multiplication into a shift by a constant.
+	// For powers of 2, use a variable shift.
+	switch {
+	case et.size == 1:
 		lenmem = uintptr(old.len)
+		newlenmem = uintptr(cap)
 		capmem = roundupsize(uintptr(newcap))
+		overflow = uintptr(newcap) > maxAlloc
 		newcap = int(capmem)
-	case ptrSize:
-		lenmem = uintptr(old.len) * ptrSize
-		capmem = roundupsize(uintptr(newcap) * ptrSize)
-		newcap = int(capmem / ptrSize)
+	case et.size == sys.PtrSize:
+		lenmem = uintptr(old.len) * sys.PtrSize
+		newlenmem = uintptr(cap) * sys.PtrSize
+		capmem = roundupsize(uintptr(newcap) * sys.PtrSize)
+		overflow = uintptr(newcap) > maxAlloc/sys.PtrSize
+		newcap = int(capmem / sys.PtrSize)
+	case isPowerOfTwo(et.size):
+		var shift uintptr
+		if sys.PtrSize == 8 {
+			// Mask shift for better code generation.
+			shift = uintptr(sys.Ctz64(uint64(et.size))) & 63
+		} else {
+			shift = uintptr(sys.Ctz32(uint32(et.size))) & 31
+		}
+		lenmem = uintptr(old.len) << shift
+		newlenmem = uintptr(cap) << shift
+		capmem = roundupsize(uintptr(newcap) << shift)
+		overflow = uintptr(newcap) > (maxAlloc >> shift)
+		newcap = int(capmem >> shift)
 	default:
 		lenmem = uintptr(old.len) * et.size
+		newlenmem = uintptr(cap) * et.size
 		capmem = roundupsize(uintptr(newcap) * et.size)
+		overflow = uintptr(newcap) > maxSliceCap(et.size)
 		newcap = int(capmem / et.size)
 	}
 
-	if cap < old.cap || uintptr(newcap) > maxSliceCap(et.size) {
+	// The check of overflow (uintptr(newcap) > maxSliceCap(et.size))
+	// in addition to capmem > _MaxMem is needed to prevent an overflow
+	// which can be used to trigger a segfault on 32bit architectures
+	// with this example program:
+	//
+	// type T [1<<27 + 1]int64
+	//
+	// var d T
+	// var s []T
+	//
+	// func main() {
+	//   s = append(s, d, d, d, d)
+	//   print(len(s), "\n")
+	// }
+	if cap < old.cap || overflow || capmem > maxAlloc {
 		panic(errorString("growslice: cap out of range"))
 	}
 
@@ -125,7 +196,9 @@ func growslice(et *_type, old slice, cap int) slice {
 	if et.kind&kindNoPointers != 0 {
 		p = mallocgc(capmem, nil, false)
 		memmove(p, old.array, lenmem)
-		memclr(add(p, lenmem), capmem-lenmem)
+		// The append() that calls growslice is going to overwrite from old.len to cap (which will be the new length).
+		// Only clear the part that will not be overwritten.
+		memclrNoHeapPointers(add(p, newlenmem), capmem-newlenmem)
 	} else {
 		// Note: can't use rawmem (which avoids zeroing of memory), because then GC can scan uninitialized memory.
 		p = mallocgc(capmem, et, true)
@@ -139,6 +212,10 @@ func growslice(et *_type, old slice, cap int) slice {
 	}
 
 	return slice{p, old.len, newcap}
+}
+
+func isPowerOfTwo(x uintptr) bool {
+	return x&(x-1) == 0
 }
 
 func slicecopy(to, fm slice, width uintptr) int {
@@ -156,7 +233,7 @@ func slicecopy(to, fm slice, width uintptr) int {
 	}
 
 	if raceenabled {
-		callerpc := getcallerpc(unsafe.Pointer(&to))
+		callerpc := getcallerpc()
 		pc := funcPC(slicecopy)
 		racewriterangepc(to.array, uintptr(n*int(width)), callerpc, pc)
 		racereadrangepc(fm.array, uintptr(n*int(width)), callerpc, pc)
@@ -187,7 +264,7 @@ func slicestringcopy(to []byte, fm string) int {
 	}
 
 	if raceenabled {
-		callerpc := getcallerpc(unsafe.Pointer(&to))
+		callerpc := getcallerpc()
 		pc := funcPC(slicestringcopy)
 		racewriterangepc(unsafe.Pointer(&to[0]), uintptr(n), callerpc, pc)
 	}

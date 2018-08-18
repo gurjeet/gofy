@@ -140,7 +140,7 @@ type Dirent struct {
 }
 
 type Fsid struct {
-	_ [2]int32
+	X__val [2]int32
 }
 
 type Flock_t struct {
@@ -588,6 +588,7 @@ type Ustat_t struct {
 
 type EpollEvent struct {
 	Events uint32
+	_      int32
 	Fd     int32
 	Pad    int32
 }
@@ -596,6 +597,7 @@ const (
 	_AT_FDCWD            = -0x64
 	_AT_REMOVEDIR        = 0x200
 	_AT_SYMLINK_NOFOLLOW = 0x100
+	_AT_EACCESS          = 0x200
 )
 
 type Termios struct {

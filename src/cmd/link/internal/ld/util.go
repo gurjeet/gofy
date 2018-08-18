@@ -5,66 +5,21 @@
 package ld
 
 import (
-	"bytes"
+	"cmd/link/internal/sym"
 	"encoding/binary"
-	"log"
+	"fmt"
 	"os"
-	"runtime"
-	"runtime/pprof"
-	"strings"
 	"time"
 )
 
-func cstring(x []byte) string {
-	i := bytes.IndexByte(x, '\x00')
-	if i >= 0 {
-		x = x[:i]
-	}
-	return string(x)
-}
+var startTime time.Time
 
-func tokenize(s string) []string {
-	var f []string
-	for {
-		s = strings.TrimLeft(s, " \t\r\n")
-		if s == "" {
-			break
-		}
-		quote := false
-		i := 0
-		for ; i < len(s); i++ {
-			if s[i] == '\'' {
-				if quote && i+1 < len(s) && s[i+1] == '\'' {
-					i++
-					continue
-				}
-				quote = !quote
-			}
-			if !quote && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n') {
-				break
-			}
-		}
-		next := s[:i]
-		s = s[i:]
-		if strings.Contains(next, "'") {
-			var buf []byte
-			quote := false
-			for i := 0; i < len(next); i++ {
-				if next[i] == '\'' {
-					if quote && i+1 < len(next) && next[i+1] == '\'' {
-						i++
-						buf = append(buf, '\'')
-					}
-					quote = !quote
-					continue
-				}
-				buf = append(buf, next[i])
-			}
-			next = string(buf)
-		}
-		f = append(f, next)
+// TODO(josharian): delete. See issue 19865.
+func Cputime() float64 {
+	if startTime.IsZero() {
+		startTime = time.Now()
 	}
-	return f
+	return time.Since(startTime).Seconds()
 }
 
 var atExitFuncs []func()
@@ -73,46 +28,39 @@ func AtExit(f func()) {
 	atExitFuncs = append(atExitFuncs, f)
 }
 
+// Exit exits with code after executing all atExitFuncs.
 func Exit(code int) {
 	for i := len(atExitFuncs) - 1; i >= 0; i-- {
-		f := atExitFuncs[i]
-		atExitFuncs = atExitFuncs[:i]
-		f()
+		atExitFuncs[i]()
 	}
 	os.Exit(code)
 }
 
-var (
-	cpuprofile     string
-	memprofile     string
-	memprofilerate int64
-)
+// Exitf logs an error message then calls Exit(2).
+func Exitf(format string, a ...interface{}) {
+	fmt.Fprintf(os.Stderr, os.Args[0]+": "+format+"\n", a...)
+	nerrors++
+	Exit(2)
+}
 
-func startProfile() {
-	if cpuprofile != "" {
-		f, err := os.Create(cpuprofile)
-		if err != nil {
-			log.Fatalf("%v", err)
-		}
-		if err := pprof.StartCPUProfile(f); err != nil {
-			log.Fatalf("%v", err)
-		}
-		AtExit(pprof.StopCPUProfile)
+// Errorf logs an error message.
+//
+// If more than 20 errors have been printed, exit with an error.
+//
+// Logging an error means that on exit cmd/link will delete any
+// output file and return a non-zero error code.
+func Errorf(s *sym.Symbol, format string, args ...interface{}) {
+	if s != nil {
+		format = s.Name + ": " + format
 	}
-	if memprofile != "" {
-		if memprofilerate != 0 {
-			runtime.MemProfileRate = int(memprofilerate)
-		}
-		f, err := os.Create(memprofile)
-		if err != nil {
-			log.Fatalf("%v", err)
-		}
-		AtExit(func() {
-			runtime.GC() // profile all outstanding allocations
-			if err := pprof.WriteHeapProfile(f); err != nil {
-				log.Fatalf("%v", err)
-			}
-		})
+	format += "\n"
+	fmt.Fprintf(os.Stderr, format, args...)
+	nerrors++
+	if *flagH {
+		panic("error")
+	}
+	if nerrors > 20 {
+		Exitf("too many errors")
 	}
 }
 

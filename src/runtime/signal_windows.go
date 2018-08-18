@@ -38,11 +38,25 @@ func initExceptionHandler() {
 	}
 }
 
+// isgoexception returns true if this exception should be translated
+// into a Go panic.
+//
+// It is nosplit to avoid growing the stack in case we're aborting
+// because of a stack overflow.
+//
+//go:nosplit
 func isgoexception(info *exceptionrecord, r *context) bool {
 	// Only handle exception if executing instructions in Go binary
 	// (not Windows library code).
 	// TODO(mwhudson): needs to loop to support shared libs
 	if r.ip() < firstmoduledata.text || firstmoduledata.etext < r.ip() {
+		return false
+	}
+
+	// In the case of an abort, the exception IP is one byte after
+	// the INT3 (this differs from UNIX OSes).
+	if isAbortPC(r.ip() - 1) {
+		// Never turn abort into a panic.
 		return false
 	}
 
@@ -66,8 +80,22 @@ func isgoexception(info *exceptionrecord, r *context) bool {
 // Called by sigtramp from Windows VEH handler.
 // Return value signals whether the exception has been handled (EXCEPTION_CONTINUE_EXECUTION)
 // or should be made available to other handlers in the chain (EXCEPTION_CONTINUE_SEARCH).
+//
+// This is the first entry into Go code for exception handling. This
+// is nosplit to avoid growing the stack until we've checked for
+// _EXCEPTION_BREAKPOINT, which is raised if we overflow the g0 stack,
+//
+//go:nosplit
 func exceptionhandler(info *exceptionrecord, r *context, gp *g) int32 {
 	if !isgoexception(info, r) {
+		return _EXCEPTION_CONTINUE_SEARCH
+	}
+
+	// After this point, it is safe to grow the stack.
+
+	if gp.throwsplit {
+		// We can't safely sigpanic because it may grow the
+		// stack. Let it fall through.
 		return _EXCEPTION_CONTINUE_SEARCH
 	}
 
@@ -100,6 +128,10 @@ func exceptionhandler(info *exceptionrecord, r *context, gp *g) int32 {
 // if ExceptionHandler returns EXCEPTION_CONTINUE_EXECUTION.
 // firstcontinuehandler will stop that search,
 // if exceptionhandler did the same earlier.
+//
+// It is nosplit for the same reason as exceptionhandler.
+//
+//go:nosplit
 func firstcontinuehandler(info *exceptionrecord, r *context, gp *g) int32 {
 	if !isgoexception(info, r) {
 		return _EXCEPTION_CONTINUE_SEARCH
@@ -111,6 +143,10 @@ var testingWER bool
 
 // lastcontinuehandler is reached, because runtime cannot handle
 // current exception. lastcontinuehandler will print crash info and exit.
+//
+// It is nosplit for the same reason as exceptionhandler.
+//
+//go:nosplit
 func lastcontinuehandler(info *exceptionrecord, r *context, gp *g) int32 {
 	if testingWER {
 		return _EXCEPTION_CONTINUE_SEARCH
@@ -123,14 +159,21 @@ func lastcontinuehandler(info *exceptionrecord, r *context, gp *g) int32 {
 	}
 	panicking = 1
 
+	// In case we're handling a g0 stack overflow, blow away the
+	// g0 stack bounds so we have room to print the traceback. If
+	// this somehow overflows the stack, the OS will trap it.
+	_g_.stack.lo = 0
+	_g_.stackguard0 = _g_.stack.lo + _StackGuard
+	_g_.stackguard1 = _g_.stackguard0
+
 	print("Exception ", hex(info.exceptioncode), " ", hex(info.exceptioninformation[0]), " ", hex(info.exceptioninformation[1]), " ", hex(r.ip()), "\n")
 
 	print("PC=", hex(r.ip()), "\n")
-	if _g_.m.lockedg != nil && _g_.m.ncgo > 0 && gp == _g_.m.g0 {
+	if _g_.m.lockedg != 0 && _g_.m.ncgo > 0 && gp == _g_.m.g0 {
 		if iscgo {
 			print("signal arrived during external code execution\n")
 		}
-		gp = _g_.m.lockedg
+		gp = _g_.m.lockedg.ptr()
 	}
 	print("\n")
 
@@ -205,7 +248,7 @@ func sigignore(sig uint32) {
 
 func badsignal2()
 
-func raisebadsignal(sig int32) {
+func raisebadsignal(sig uint32) {
 	badsignal2()
 }
 
@@ -213,6 +256,7 @@ func signame(sig uint32) string {
 	return ""
 }
 
+//go:nosplit
 func crash() {
 	// TODO: This routine should do whatever is needed
 	// to make the Windows program abort/crash as it
@@ -223,3 +267,6 @@ func crash() {
 	// It's okay to leave this empty for now: if crash returns
 	// the ordinary exit-after-panic happens.
 }
+
+// gsignalStack is unused on Windows.
+type gsignalStack struct{}

@@ -11,9 +11,6 @@
 TEXT runtime·rt0_go(SB),NOSPLIT,$0
 	// SP = stack; R0 = argc; R1 = argv
 
-	// initialize essential registers
-	BL	runtime·reginit(SB)
-
 	SUB	$32, RSP
 	MOVW	R0, 8(RSP) // argc
 	MOVD	R1, 16(RSP) // argv
@@ -93,20 +90,11 @@ nocgo:
 DATA	runtime·mainPC+0(SB)/8,$runtime·main(SB)
 GLOBL	runtime·mainPC(SB),RODATA,$8
 
-TEXT runtime·breakpoint(SB),NOSPLIT,$-8-0
+TEXT runtime·breakpoint(SB),NOSPLIT|NOFRAME,$0-0
 	BRK
 	RET
 
-TEXT runtime·asminit(SB),NOSPLIT,$-8-0
-	RET
-
-TEXT runtime·reginit(SB),NOSPLIT,$-8-0
-	// initialize essential FP registers
-	FMOVD	$4503601774854144.0, F27
-	FMOVD	$0.5, F29
-	FSUBD	F29, F29, F28
-	FADDD	F29, F29, F30
-	FADDD	F30, F30, F31
+TEXT runtime·asminit(SB),NOSPLIT|NOFRAME,$0-0
 	RET
 
 /*
@@ -115,7 +103,7 @@ TEXT runtime·reginit(SB),NOSPLIT,$-8-0
 
 // void gosave(Gobuf*)
 // save state in Gobuf; setjmp
-TEXT runtime·gosave(SB), NOSPLIT, $-8-8
+TEXT runtime·gosave(SB), NOSPLIT|NOFRAME, $0-8
 	MOVD	buf+0(FP), R3
 	MOVD	RSP, R0
 	MOVD	R0, gobuf_sp(R3)
@@ -123,12 +111,16 @@ TEXT runtime·gosave(SB), NOSPLIT, $-8-8
 	MOVD	g, gobuf_g(R3)
 	MOVD	ZR, gobuf_lr(R3)
 	MOVD	ZR, gobuf_ret(R3)
-	MOVD	ZR, gobuf_ctxt(R3)
+	// Assert ctxt is zero. See func save.
+	MOVD	gobuf_ctxt(R3), R0
+	CMP	$0, R0
+	BEQ	2(PC)
+	CALL	runtime·badctxt(SB)
 	RET
 
 // void gogo(Gobuf*)
 // restore state from Gobuf; longjmp
-TEXT runtime·gogo(SB), NOSPLIT, $-8-8
+TEXT runtime·gogo(SB), NOSPLIT, $24-8
 	MOVD	buf+0(FP), R5
 	MOVD	gobuf_g(R5), g
 	BL	runtime·save_g(SB)
@@ -151,7 +143,7 @@ TEXT runtime·gogo(SB), NOSPLIT, $-8-8
 // Switch to m->g0's stack, call fn(g).
 // Fn must never return. It should gogo(&g->sched)
 // to keep running g.
-TEXT runtime·mcall(SB), NOSPLIT, $-8-8
+TEXT runtime·mcall(SB), NOSPLIT|NOFRAME, $0-8
 	// Save caller state in g->sched
 	MOVD	RSP, R0
 	MOVD	R0, (g_sched+gobuf_sp)(g)
@@ -209,6 +201,7 @@ TEXT runtime·systemstack(SB), NOSPLIT, $0-8
 	// Hide call from linker nosplit analysis.
 	MOVD	$runtime·badsystemstack(SB), R3
 	BL	(R3)
+	B	runtime·abort(SB)
 
 switch:
 	// save our state in g->sched. Pretend to
@@ -247,9 +240,11 @@ switch:
 
 noswitch:
 	// already on m stack, just call directly
+	// Using a tail call here cleans up tracebacks since we won't stop
+	// at an intermediate systemstack.
 	MOVD	0(R26), R3	// code pointer
-	BL	(R3)
-	RET
+	MOVD.P	16(RSP), R30	// restore LR
+	B	(R3)
 
 /*
  * support for morestack
@@ -263,27 +258,29 @@ noswitch:
 // the top of a stack (for example, morestack calling newstack
 // calling the scheduler calling newm calling gc), so we must
 // record an argument size. For that purpose, it has no arguments.
-TEXT runtime·morestack(SB),NOSPLIT,$-8-0
+TEXT runtime·morestack(SB),NOSPLIT|NOFRAME,$0-0
 	// Cannot grow scheduler stack (m->g0).
 	MOVD	g_m(g), R8
 	MOVD	m_g0(R8), R4
 	CMP	g, R4
-	BNE	2(PC)
+	BNE	3(PC)
+	BL	runtime·badmorestackg0(SB)
 	B	runtime·abort(SB)
 
 	// Cannot grow signal stack (m->gsignal).
 	MOVD	m_gsignal(R8), R4
 	CMP	g, R4
-	BNE	2(PC)
+	BNE	3(PC)
+	BL	runtime·badmorestackgsignal(SB)
 	B	runtime·abort(SB)
 
 	// Called from f.
 	// Set g->sched to context in f
-	MOVD	R26, (g_sched+gobuf_ctxt)(g)
 	MOVD	RSP, R0
 	MOVD	R0, (g_sched+gobuf_sp)(g)
 	MOVD	LR, (g_sched+gobuf_pc)(g)
 	MOVD	R3, (g_sched+gobuf_lr)(g)
+	MOVD	R26, (g_sched+gobuf_ctxt)(g)
 
 	// Called from f.
 	// Set m->morebuf to f's callers.
@@ -297,32 +294,16 @@ TEXT runtime·morestack(SB),NOSPLIT,$-8-0
 	BL	runtime·save_g(SB)
 	MOVD	(g_sched+gobuf_sp)(g), R0
 	MOVD	R0, RSP
+	MOVD.W	$0, -16(RSP)	// create a call frame on g0 (saved LR; keep 16-aligned)
 	BL	runtime·newstack(SB)
 
 	// Not reached, but make sure the return PC from the call to newstack
 	// is still in this function, and not the beginning of the next.
 	UNDEF
 
-TEXT runtime·morestack_noctxt(SB),NOSPLIT,$-4-0
+TEXT runtime·morestack_noctxt(SB),NOSPLIT|NOFRAME,$0-0
 	MOVW	$0, R26
 	B runtime·morestack(SB)
-
-TEXT runtime·stackBarrier(SB),NOSPLIT,$0
-	// We came here via a RET to an overwritten LR.
-	// R0 may be live (see return0). Other registers are available.
-
-	// Get the original return PC, g.stkbar[g.stkbarPos].savedLRVal.
-	MOVD	(g_stkbar+slice_array)(g), R4
-	MOVD	g_stkbarPos(g), R5
-	MOVD	$stkbar__size, R6
-	MUL	R5, R6
-	ADD	R4, R6
-	MOVD	stkbar_savedLRVal(R6), R6
-	// Record that this stack barrier was hit.
-	ADD	$1, R5
-	MOVD	R5, g_stkbarPos(g)
-	// Jump to the original return PC.
-	B	(R6)
 
 // reflectcall: call a function with the given argument list
 // func call(argtype *_type, f *FuncVal, arg *byte, argsize, retoffset uint32).
@@ -341,10 +322,8 @@ TEXT runtime·stackBarrier(SB),NOSPLIT,$0
 TEXT reflect·call(SB), NOSPLIT, $0-0
 	B	·reflectcall(SB)
 
-TEXT ·reflectcall(SB), NOSPLIT, $-8-32
+TEXT ·reflectcall(SB), NOSPLIT|NOFRAME, $0-32
 	MOVWU argsize+24(FP), R16
-	// NOTE(rsc): No call16, because CALLFN needs four words
-	// of argument space to invoke callwritebarrier.
 	DISPATCH(runtime·call32, 32)
 	DISPATCH(runtime·call64, 64)
 	DISPATCH(runtime·call128, 128)
@@ -379,49 +358,53 @@ TEXT NAME(SB), WRAPPER, $MAXSIZE-24;		\
 	NO_LOCAL_POINTERS;			\
 	/* copy arguments to stack */		\
 	MOVD	arg+16(FP), R3;			\
-	MOVWU	argsize+24(FP), R4;			\
-	MOVD	RSP, R5;				\
-	ADD	$(8-1), R5;			\
-	SUB	$1, R3;				\
-	ADD	R5, R4;				\
-	CMP	R5, R4;				\
-	BEQ	4(PC);				\
-	MOVBU.W	1(R3), R6;			\
-	MOVBU.W	R6, 1(R5);			\
-	B	-4(PC);				\
+	MOVWU	argsize+24(FP), R4;		\
+	ADD	$8, RSP, R5;			\
+	BIC	$0xf, R4, R6;			\
+	CBZ	R6, 6(PC);			\
+	/* if R6=(argsize&~15) != 0 */		\
+	ADD	R6, R5, R6;			\
+	/* copy 16 bytes a time */		\
+	LDP.P	16(R3), (R7, R8);		\
+	STP.P	(R7, R8), 16(R5);		\
+	CMP	R5, R6;				\
+	BNE	-3(PC);				\
+	AND	$0xf, R4, R6;			\
+	CBZ	R6, 6(PC);			\
+	/* if R6=(argsize&15) != 0 */		\
+	ADD	R6, R5, R6;			\
+	/* copy 1 byte a time for the rest */	\
+	MOVBU.P	1(R3), R7;			\
+	MOVBU.P	R7, 1(R5);			\
+	CMP	R5, R6;				\
+	BNE	-3(PC);				\
 	/* call function */			\
 	MOVD	f+8(FP), R26;			\
 	MOVD	(R26), R0;			\
 	PCDATA  $PCDATA_StackMapIndex, $0;	\
 	BL	(R0);				\
 	/* copy return values back */		\
-	MOVD	arg+16(FP), R3;			\
-	MOVWU	n+24(FP), R4;			\
-	MOVWU	retoffset+28(FP), R6;		\
-	MOVD	RSP, R5;				\
-	ADD	R6, R5; 			\
-	ADD	R6, R3;				\
-	SUB	R6, R4;				\
-	ADD	$(8-1), R5;			\
-	SUB	$1, R3;				\
-	ADD	R5, R4;				\
-loop:						\
-	CMP	R5, R4;				\
-	BEQ	end;				\
-	MOVBU.W	1(R5), R6;			\
-	MOVBU.W	R6, 1(R3);			\
-	B	loop;				\
-end:						\
-	/* execute write barrier updates */	\
 	MOVD	argtype+0(FP), R7;		\
 	MOVD	arg+16(FP), R3;			\
 	MOVWU	n+24(FP), R4;			\
 	MOVWU	retoffset+28(FP), R6;		\
-	MOVD	R7, 8(RSP);			\
-	MOVD	R3, 16(RSP);			\
-	MOVD	R4, 24(RSP);			\
-	MOVD	R6, 32(RSP);			\
-	BL	runtime·callwritebarrier(SB);	\
+	ADD	$8, RSP, R5;			\
+	ADD	R6, R5; 			\
+	ADD	R6, R3;				\
+	SUB	R6, R4;				\
+	BL	callRet<>(SB);			\
+	RET
+
+// callRet copies return values back at the end of call*. This is a
+// separate function so it can allocate stack space for the arguments
+// to reflectcallmove. It does not follow the Go ABI; it expects its
+// arguments in registers.
+TEXT callRet<>(SB), NOSPLIT, $40-0
+	MOVD	R7, 8(RSP)
+	MOVD	R3, 16(RSP)
+	MOVD	R5, 24(RSP)
+	MOVD	R4, 32(RSP)
+	BL	runtime·reflectcallmove(SB)
 	RET
 
 // These have 8 added to make the overall frame size a multiple of 16,
@@ -453,20 +436,385 @@ CALLFN(·call268435456, 268435464 )
 CALLFN(·call536870912, 536870920 )
 CALLFN(·call1073741824, 1073741832 )
 
-// AES hashing not implemented for ARM64, issue #10109.
-TEXT runtime·aeshash(SB),NOSPLIT,$-8-0
-	MOVW	$0, R0
-	MOVW	(R0), R1
-TEXT runtime·aeshash32(SB),NOSPLIT,$-8-0
-	MOVW	$0, R0
-	MOVW	(R0), R1
-TEXT runtime·aeshash64(SB),NOSPLIT,$-8-0
-	MOVW	$0, R0
-	MOVW	(R0), R1
-TEXT runtime·aeshashstr(SB),NOSPLIT,$-8-0
-	MOVW	$0, R0
-	MOVW	(R0), R1
-	
+// func aeshash32(p unsafe.Pointer, h uintptr) uintptr
+TEXT runtime·aeshash32(SB),NOSPLIT|NOFRAME,$0-24
+	MOVD	p+0(FP), R0
+	MOVD	h+8(FP), R1
+	MOVD	$ret+16(FP), R2
+	MOVD	$runtime·aeskeysched+0(SB), R3
+
+	VEOR	V0.B16, V0.B16, V0.B16
+	VLD1	(R3), [V2.B16]
+	VLD1	(R0), V0.S[1]
+	VMOV	R1, V0.S[0]
+
+	AESE	V2.B16, V0.B16
+	AESMC	V0.B16, V0.B16
+	AESE	V2.B16, V0.B16
+	AESMC	V0.B16, V0.B16
+	AESE	V2.B16, V0.B16
+
+	VST1	[V0.D1], (R2)
+	RET
+
+// func aeshash64(p unsafe.Pointer, h uintptr) uintptr
+TEXT runtime·aeshash64(SB),NOSPLIT|NOFRAME,$0-24
+	MOVD	p+0(FP), R0
+	MOVD	h+8(FP), R1
+	MOVD	$ret+16(FP), R2
+	MOVD	$runtime·aeskeysched+0(SB), R3
+
+	VEOR	V0.B16, V0.B16, V0.B16
+	VLD1	(R3), [V2.B16]
+	VLD1	(R0), V0.D[1]
+	VMOV	R1, V0.D[0]
+
+	AESE	V2.B16, V0.B16
+	AESMC	V0.B16, V0.B16
+	AESE	V2.B16, V0.B16
+	AESMC	V0.B16, V0.B16
+	AESE	V2.B16, V0.B16
+
+	VST1	[V0.D1], (R2)
+	RET
+
+// func aeshash(p unsafe.Pointer, h, size uintptr) uintptr
+TEXT runtime·aeshash(SB),NOSPLIT|NOFRAME,$0-32
+	MOVD	p+0(FP), R0
+	MOVD	s+16(FP), R1
+	MOVWU	h+8(FP), R3
+	MOVD	$ret+24(FP), R2
+	B	aeshashbody<>(SB)
+
+// func aeshashstr(p unsafe.Pointer, h uintptr) uintptr
+TEXT runtime·aeshashstr(SB),NOSPLIT|NOFRAME,$0-24
+	MOVD	p+0(FP), R10 // string pointer
+	LDP	(R10), (R0, R1) //string data/ length
+	MOVWU	h+8(FP), R3
+	MOVD	$ret+16(FP), R2 // return adddress
+	B	aeshashbody<>(SB)
+
+// R0: data
+// R1: length (maximum 32 bits)
+// R2: address to put return value
+// R3: seed data
+TEXT aeshashbody<>(SB),NOSPLIT|NOFRAME,$0
+	VEOR	V30.B16, V30.B16, V30.B16
+	VMOV	R3, V30.S[0]
+	VMOV	R1, V30.S[1] // load length into seed
+
+	MOVD	$runtime·aeskeysched+0(SB), R4
+	VLD1.P	16(R4), [V0.B16]
+	AESE	V30.B16, V0.B16
+	AESMC	V0.B16, V0.B16
+	CMP	$16, R1
+	BLO	aes0to15
+	BEQ	aes16
+	CMP	$32, R1
+	BLS	aes17to32
+	CMP	$64, R1
+	BLS	aes33to64
+	CMP	$128, R1
+	BLS	aes65to128
+	B	aes129plus
+
+aes0to15:
+	CMP	$0, R1
+	BEQ	aes0
+	VEOR	V2.B16, V2.B16, V2.B16
+	TBZ	$3, R1, less_than_8
+	VLD1.P	8(R0), V2.D[0]
+
+less_than_8:
+	TBZ	$2, R1, less_than_4
+	VLD1.P	4(R0), V2.S[2]
+
+less_than_4:
+	TBZ	$1, R1, less_than_2
+	VLD1.P	2(R0), V2.H[6]
+
+less_than_2:
+	TBZ	$0, R1, done
+	VLD1	(R0), V2.B[14]
+done:
+	AESE	V0.B16, V2.B16
+	AESMC	V2.B16, V2.B16
+	AESE	V0.B16, V2.B16
+	AESMC	V2.B16, V2.B16
+	AESE	V0.B16, V2.B16
+
+	VST1	[V2.D1], (R2)
+	RET
+aes0:
+	VST1	[V0.D1], (R2)
+	RET
+aes16:
+	VLD1	(R0), [V2.B16]
+	B	done
+
+aes17to32:
+	// make second seed
+	VLD1	(R4), [V1.B16]
+	AESE	V30.B16, V1.B16
+	AESMC	V1.B16, V1.B16
+	SUB	$16, R1, R10
+	VLD1.P	(R0)(R10), [V2.B16]
+	VLD1	(R0), [V3.B16]
+
+	AESE	V0.B16, V2.B16
+	AESMC	V2.B16, V2.B16
+	AESE	V1.B16, V3.B16
+	AESMC	V3.B16, V3.B16
+
+	AESE	V0.B16, V2.B16
+	AESMC	V2.B16, V2.B16
+	AESE	V1.B16, V3.B16
+	AESMC	V3.B16, V3.B16
+
+	AESE	V0.B16, V2.B16
+	AESE	V1.B16, V3.B16
+
+	VEOR	V3.B16, V2.B16, V2.B16
+	VST1	[V2.D1], (R2)
+	RET
+
+aes33to64:
+	VLD1	(R4), [V1.B16, V2.B16, V3.B16]
+	AESE	V30.B16, V1.B16
+	AESMC	V1.B16, V1.B16
+	AESE	V30.B16, V2.B16
+	AESMC	V2.B16, V2.B16
+	AESE	V30.B16, V3.B16
+	AESMC	V3.B16, V3.B16
+	SUB	$32, R1, R10
+
+	VLD1.P	(R0)(R10), [V4.B16, V5.B16]
+	VLD1	(R0), [V6.B16, V7.B16]
+
+	AESE	V0.B16, V4.B16
+	AESMC	V4.B16, V4.B16
+	AESE	V1.B16, V5.B16
+	AESMC	V5.B16, V5.B16
+	AESE	V2.B16, V6.B16
+	AESMC	V6.B16, V6.B16
+	AESE	V3.B16, V7.B16
+	AESMC	V7.B16, V7.B16
+
+	AESE	V0.B16, V4.B16
+	AESMC	V4.B16, V4.B16
+	AESE	V1.B16, V5.B16
+	AESMC	V5.B16, V5.B16
+	AESE	V2.B16, V6.B16
+	AESMC	V6.B16, V6.B16
+	AESE	V3.B16, V7.B16
+	AESMC	V7.B16, V7.B16
+
+	AESE	V0.B16, V4.B16
+	AESE	V1.B16, V5.B16
+	AESE	V2.B16, V6.B16
+	AESE	V3.B16, V7.B16
+
+	VEOR	V6.B16, V4.B16, V4.B16
+	VEOR	V7.B16, V5.B16, V5.B16
+	VEOR	V5.B16, V4.B16, V4.B16
+
+	VST1	[V4.D1], (R2)
+	RET
+
+aes65to128:
+	VLD1.P	64(R4), [V1.B16, V2.B16, V3.B16, V4.B16]
+	VLD1	(R4), [V5.B16, V6.B16, V7.B16]
+	AESE	V30.B16, V1.B16
+	AESMC	V1.B16, V1.B16
+	AESE	V30.B16, V2.B16
+	AESMC	V2.B16, V2.B16
+	AESE	V30.B16, V3.B16
+	AESMC	V3.B16, V3.B16
+	AESE	V30.B16, V4.B16
+	AESMC	V4.B16, V4.B16
+	AESE	V30.B16, V5.B16
+	AESMC	V5.B16, V5.B16
+	AESE	V30.B16, V6.B16
+	AESMC	V6.B16, V6.B16
+	AESE	V30.B16, V7.B16
+	AESMC	V7.B16, V7.B16
+
+	SUB	$64, R1, R10
+	VLD1.P	(R0)(R10), [V8.B16, V9.B16, V10.B16, V11.B16]
+	VLD1	(R0), [V12.B16, V13.B16, V14.B16, V15.B16]
+	AESE	V0.B16,	 V8.B16
+	AESMC	V8.B16,  V8.B16
+	AESE	V1.B16,	 V9.B16
+	AESMC	V9.B16,  V9.B16
+	AESE	V2.B16, V10.B16
+	AESMC	V10.B16,  V10.B16
+	AESE	V3.B16, V11.B16
+	AESMC	V11.B16,  V11.B16
+	AESE	V4.B16, V12.B16
+	AESMC	V12.B16,  V12.B16
+	AESE	V5.B16, V13.B16
+	AESMC	V13.B16,  V13.B16
+	AESE	V6.B16, V14.B16
+	AESMC	V14.B16,  V14.B16
+	AESE	V7.B16, V15.B16
+	AESMC	V15.B16,  V15.B16
+
+	AESE	V0.B16,	 V8.B16
+	AESMC	V8.B16,  V8.B16
+	AESE	V1.B16,	 V9.B16
+	AESMC	V9.B16,  V9.B16
+	AESE	V2.B16, V10.B16
+	AESMC	V10.B16,  V10.B16
+	AESE	V3.B16, V11.B16
+	AESMC	V11.B16,  V11.B16
+	AESE	V4.B16, V12.B16
+	AESMC	V12.B16,  V12.B16
+	AESE	V5.B16, V13.B16
+	AESMC	V13.B16,  V13.B16
+	AESE	V6.B16, V14.B16
+	AESMC	V14.B16,  V14.B16
+	AESE	V7.B16, V15.B16
+	AESMC	V15.B16,  V15.B16
+
+	AESE	V0.B16,	 V8.B16
+	AESE	V1.B16,	 V9.B16
+	AESE	V2.B16, V10.B16
+	AESE	V3.B16, V11.B16
+	AESE	V4.B16, V12.B16
+	AESE	V5.B16, V13.B16
+	AESE	V6.B16, V14.B16
+	AESE	V7.B16, V15.B16
+
+	VEOR	V12.B16, V8.B16, V8.B16
+	VEOR	V13.B16, V9.B16, V9.B16
+	VEOR	V14.B16, V10.B16, V10.B16
+	VEOR	V15.B16, V11.B16, V11.B16
+	VEOR	V10.B16, V8.B16, V8.B16
+	VEOR	V11.B16, V9.B16, V9.B16
+	VEOR	V9.B16, V8.B16, V8.B16
+
+	VST1	[V8.D1], (R2)
+	RET
+
+aes129plus:
+	PRFM (R0), PLDL1KEEP
+	VLD1.P	64(R4), [V1.B16, V2.B16, V3.B16, V4.B16]
+	VLD1	(R4), [V5.B16, V6.B16, V7.B16]
+	AESE	V30.B16, V1.B16
+	AESMC	V1.B16, V1.B16
+	AESE	V30.B16, V2.B16
+	AESMC	V2.B16, V2.B16
+	AESE	V30.B16, V3.B16
+	AESMC	V3.B16, V3.B16
+	AESE	V30.B16, V4.B16
+	AESMC	V4.B16, V4.B16
+	AESE	V30.B16, V5.B16
+	AESMC	V5.B16, V5.B16
+	AESE	V30.B16, V6.B16
+	AESMC	V6.B16, V6.B16
+	AESE	V30.B16, V7.B16
+	AESMC	V7.B16, V7.B16
+	ADD	R0, R1, R10
+	SUB	$128, R10, R10
+	VLD1.P	64(R10), [V8.B16, V9.B16, V10.B16, V11.B16]
+	VLD1	(R10), [V12.B16, V13.B16, V14.B16, V15.B16]
+	SUB	$1, R1, R1
+	LSR	$7, R1, R1
+
+aesloop:
+	AESE	V8.B16,	 V0.B16
+	AESMC	V0.B16,  V0.B16
+	AESE	V9.B16,	 V1.B16
+	AESMC	V1.B16,  V1.B16
+	AESE	V10.B16, V2.B16
+	AESMC	V2.B16,  V2.B16
+	AESE	V11.B16, V3.B16
+	AESMC	V3.B16,  V3.B16
+	AESE	V12.B16, V4.B16
+	AESMC	V4.B16,  V4.B16
+	AESE	V13.B16, V5.B16
+	AESMC	V5.B16,  V5.B16
+	AESE	V14.B16, V6.B16
+	AESMC	V6.B16,  V6.B16
+	AESE	V15.B16, V7.B16
+	AESMC	V7.B16,  V7.B16
+
+	VLD1.P	64(R0), [V8.B16, V9.B16, V10.B16, V11.B16]
+	AESE	V8.B16,	 V0.B16
+	AESMC	V0.B16,  V0.B16
+	AESE	V9.B16,	 V1.B16
+	AESMC	V1.B16,  V1.B16
+	AESE	V10.B16, V2.B16
+	AESMC	V2.B16,  V2.B16
+	AESE	V11.B16, V3.B16
+	AESMC	V3.B16,  V3.B16
+
+	VLD1.P	64(R0), [V12.B16, V13.B16, V14.B16, V15.B16]
+	AESE	V12.B16, V4.B16
+	AESMC	V4.B16,  V4.B16
+	AESE	V13.B16, V5.B16
+	AESMC	V5.B16,  V5.B16
+	AESE	V14.B16, V6.B16
+	AESMC	V6.B16,  V6.B16
+	AESE	V15.B16, V7.B16
+	AESMC	V7.B16,  V7.B16
+	SUB	$1, R1, R1
+	CBNZ	R1, aesloop
+
+	AESE	V8.B16,	 V0.B16
+	AESMC	V0.B16,  V0.B16
+	AESE	V9.B16,	 V1.B16
+	AESMC	V1.B16,  V1.B16
+	AESE	V10.B16, V2.B16
+	AESMC	V2.B16,  V2.B16
+	AESE	V11.B16, V3.B16
+	AESMC	V3.B16,  V3.B16
+	AESE	V12.B16, V4.B16
+	AESMC	V4.B16,  V4.B16
+	AESE	V13.B16, V5.B16
+	AESMC	V5.B16,  V5.B16
+	AESE	V14.B16, V6.B16
+	AESMC	V6.B16,  V6.B16
+	AESE	V15.B16, V7.B16
+	AESMC	V7.B16,  V7.B16
+
+	AESE	V8.B16,	 V0.B16
+	AESMC	V0.B16,  V0.B16
+	AESE	V9.B16,	 V1.B16
+	AESMC	V1.B16,  V1.B16
+	AESE	V10.B16, V2.B16
+	AESMC	V2.B16,  V2.B16
+	AESE	V11.B16, V3.B16
+	AESMC	V3.B16,  V3.B16
+	AESE	V12.B16, V4.B16
+	AESMC	V4.B16,  V4.B16
+	AESE	V13.B16, V5.B16
+	AESMC	V5.B16,  V5.B16
+	AESE	V14.B16, V6.B16
+	AESMC	V6.B16,  V6.B16
+	AESE	V15.B16, V7.B16
+	AESMC	V7.B16,  V7.B16
+
+	AESE	V8.B16,	 V0.B16
+	AESE	V9.B16,	 V1.B16
+	AESE	V10.B16, V2.B16
+	AESE	V11.B16, V3.B16
+	AESE	V12.B16, V4.B16
+	AESE	V13.B16, V5.B16
+	AESE	V14.B16, V6.B16
+	AESE	V15.B16, V7.B16
+
+	VEOR	V0.B16, V1.B16, V0.B16
+	VEOR	V2.B16, V3.B16, V2.B16
+	VEOR	V4.B16, V5.B16, V4.B16
+	VEOR	V6.B16, V7.B16, V6.B16
+	VEOR	V0.B16, V2.B16, V0.B16
+	VEOR	V4.B16, V6.B16, V4.B16
+	VEOR	V4.B16, V0.B16, V0.B16
+
+	VST1	[V0.D1], (R2)
+	RET
+
 TEXT runtime·procyield(SB),NOSPLIT,$0-0
 	MOVWU	cycles+0(FP), R0
 again:
@@ -480,7 +828,7 @@ again:
 // 1. grab stored LR for caller
 // 2. sub 4 bytes to get back to BL deferreturn
 // 3. BR to fn
-TEXT runtime·jmpdefer(SB), NOSPLIT, $-8-16
+TEXT runtime·jmpdefer(SB), NOSPLIT|NOFRAME, $0-16
 	MOVD	0(RSP), R0
 	SUB	$4, R0
 	MOVD	R0, LR
@@ -493,13 +841,17 @@ TEXT runtime·jmpdefer(SB), NOSPLIT, $-8-16
 	B	(R3)
 
 // Save state of caller into g->sched. Smashes R0.
-TEXT gosave<>(SB),NOSPLIT,$-8
+TEXT gosave<>(SB),NOSPLIT|NOFRAME,$0
 	MOVD	LR, (g_sched+gobuf_pc)(g)
 	MOVD RSP, R0
 	MOVD	R0, (g_sched+gobuf_sp)(g)
 	MOVD	$0, (g_sched+gobuf_lr)(g)
 	MOVD	$0, (g_sched+gobuf_ret)(g)
-	MOVD	$0, (g_sched+gobuf_ctxt)(g)
+	// Assert ctxt is zero. See func save.
+	MOVD	(g_sched+gobuf_ctxt)(g), R0
+	CMP	$0, R0
+	BEQ	2(PC)
+	CALL	runtime·badctxt(SB)
 	RET
 
 // func asmcgocall(fn, arg unsafe.Pointer) int32
@@ -511,15 +863,22 @@ TEXT ·asmcgocall(SB),NOSPLIT,$0-20
 	MOVD	arg+8(FP), R0
 
 	MOVD	RSP, R2		// save original stack pointer
+	CMP	$0, g
+	BEQ	nosave
 	MOVD	g, R4
 
 	// Figure out if we need to switch to m->g0 stack.
 	// We get called to create new OS threads too, and those
 	// come in on the m->g0 stack already.
 	MOVD	g_m(g), R8
+	MOVD	m_gsignal(R8), R3
+	CMP	R3, g
+	BEQ	nosave
 	MOVD	m_g0(R8), R3
 	CMP	R3, g
-	BEQ	g0
+	BEQ	nosave
+
+	// Switch to system stack.
 	MOVD	R0, R9	// gosave<> and save_g might clobber R0
 	BL	gosave<>(SB)
 	MOVD	R3, g
@@ -529,7 +888,6 @@ TEXT ·asmcgocall(SB),NOSPLIT,$0-20
 	MOVD	R9, R0
 
 	// Now on a scheduling stack (a pthread-created stack).
-g0:
 	// Save room for two of our pointers /*, plus 32 bytes of callee
 	// save area that lives on the caller stack. */
 	MOVD	RSP, R13
@@ -552,6 +910,30 @@ g0:
 	MOVD	R5, RSP
 
 	MOVW	R0, ret+16(FP)
+	RET
+
+nosave:
+	// Running on a system stack, perhaps even without a g.
+	// Having no g can happen during thread creation or thread teardown
+	// (see needm/dropm on Solaris, for example).
+	// This code is like the above sequence but without saving/restoring g
+	// and without worrying about the stack moving out from under us
+	// (because we're on a system stack, not a goroutine stack).
+	// The above code could be used directly if already on a system stack,
+	// but then the only path through this code would be a rare case on Solaris.
+	// Using this code for all "already on system stack" calls exercises it more,
+	// which should help keep it correct.
+	MOVD	RSP, R13
+	SUB	$16, R13
+	MOVD	R13, RSP
+	MOVD	$0, R4
+	MOVD	R4, 0(RSP)	// Where above code stores g, in case someone looks during debugging.
+	MOVD	R2, 8(RSP)	// Save original stack pointer.
+	BL	(R1)
+	// Restore stack pointer.
+	MOVD	8(RSP), R2
+	MOVD	R2, RSP	
+	MOVD	R0, ret+16(FP)
 	RET
 
 // cgocallback(void (*fn)(void*), void *frame, uintptr framesize, uintptr ctxt)
@@ -717,261 +1099,10 @@ TEXT setg_gcc<>(SB),NOSPLIT,$8
 	MOVD	savedR27-8(SP), R27
 	RET
 
-TEXT runtime·getcallerpc(SB),NOSPLIT,$8-16
-	MOVD	16(RSP), R0		// LR saved by caller
-	MOVD	runtime·stackBarrierPC(SB), R1
-	CMP	R0, R1
-	BNE	nobar
-	// Get original return PC.
-	BL	runtime·nextBarrierPC(SB)
-	MOVD	8(RSP), R0
-nobar:
-	MOVD	R0, ret+8(FP)
-	RET
-
-TEXT runtime·setcallerpc(SB),NOSPLIT,$8-16
-	MOVD	pc+8(FP), R0
-	MOVD	16(RSP), R1
-	MOVD	runtime·stackBarrierPC(SB), R2
-	CMP	R1, R2
-	BEQ	setbar
-	MOVD	R0, 16(RSP)		// set LR in caller
-	RET
-setbar:
-	// Set the stack barrier return PC.
-	MOVD	R0, 8(RSP)
-	BL	runtime·setNextBarrierPC(SB)
-	RET
-
-TEXT runtime·getcallersp(SB),NOSPLIT,$0-16
-	MOVD	argp+0(FP), R0
-	SUB	$8, R0
-	MOVD	R0, ret+8(FP)
-	RET
-
-TEXT runtime·abort(SB),NOSPLIT,$-8-0
-	B	(ZR)
+TEXT runtime·abort(SB),NOSPLIT|NOFRAME,$0-0
+	MOVD	ZR, R0
+	MOVD	(R0), R0
 	UNDEF
-
-// memhash_varlen(p unsafe.Pointer, h seed) uintptr
-// redirects to memhash(p, h, size) using the size
-// stored in the closure.
-TEXT runtime·memhash_varlen(SB),NOSPLIT,$40-24
-	GO_ARGS
-	NO_LOCAL_POINTERS
-	MOVD	p+0(FP), R3
-	MOVD	h+8(FP), R4
-	MOVD	8(R26), R5
-	MOVD	R3, 8(RSP)
-	MOVD	R4, 16(RSP)
-	MOVD	R5, 24(RSP)
-	BL	runtime·memhash(SB)
-	MOVD	32(RSP), R3
-	MOVD	R3, ret+16(FP)
-	RET
-
-// memequal(p, q unsafe.Pointer, size uintptr) bool
-TEXT runtime·memequal(SB),NOSPLIT,$-8-25
-	MOVD	a+0(FP), R1
-	MOVD	b+8(FP), R2
-	MOVD	size+16(FP), R3
-	ADD	R1, R3, R6
-	MOVD	$1, R0
-	MOVB	R0, ret+24(FP)
-	CMP	R1, R2
-	BEQ	done
-loop:
-	CMP	R1, R6
-	BEQ	done
-	MOVBU.P	1(R1), R4
-	MOVBU.P	1(R2), R5
-	CMP	R4, R5
-	BEQ	loop
-
-	MOVB	$0, ret+24(FP)
-done:
-	RET
-
-// memequal_varlen(a, b unsafe.Pointer) bool
-TEXT runtime·memequal_varlen(SB),NOSPLIT,$40-17
-	MOVD	a+0(FP), R3
-	MOVD	b+8(FP), R4
-	CMP	R3, R4
-	BEQ	eq
-	MOVD	8(R26), R5    // compiler stores size at offset 8 in the closure
-	MOVD	R3, 8(RSP)
-	MOVD	R4, 16(RSP)
-	MOVD	R5, 24(RSP)
-	BL	runtime·memequal(SB)
-	MOVBU	32(RSP), R3
-	MOVB	R3, ret+16(FP)
-	RET
-eq:
-	MOVD	$1, R3
-	MOVB	R3, ret+16(FP)
-	RET
-
-TEXT runtime·cmpstring(SB),NOSPLIT,$-4-40
-	MOVD	s1_base+0(FP), R2
-	MOVD	s1_len+8(FP), R0
-	MOVD	s2_base+16(FP), R3
-	MOVD	s2_len+24(FP), R1
-	ADD	$40, RSP, R7
-	B	runtime·cmpbody<>(SB)
-
-TEXT bytes·Compare(SB),NOSPLIT,$-4-56
-	MOVD	s1+0(FP), R2
-	MOVD	s1+8(FP), R0
-	MOVD	s2+24(FP), R3
-	MOVD	s2+32(FP), R1
-	ADD	$56, RSP, R7
-	B	runtime·cmpbody<>(SB)
-
-// On entry:
-// R0 is the length of s1
-// R1 is the length of s2
-// R2 points to the start of s1
-// R3 points to the start of s2
-// R7 points to return value (-1/0/1 will be written here)
-//
-// On exit:
-// R4, R5, and R6 are clobbered
-TEXT runtime·cmpbody<>(SB),NOSPLIT,$-4-0
-	CMP	R2, R3
-	BEQ	samebytes // same starting pointers; compare lengths
-	CMP	R0, R1
-	CSEL    LT, R1, R0, R6 // R6 is min(R0, R1)
-
-	ADD	R2, R6	// R2 is current byte in s1, R6 is last byte in s1 to compare
-loop:
-	CMP	R2, R6
-	BEQ	samebytes // all compared bytes were the same; compare lengths
-	MOVBU.P	1(R2), R4
-	MOVBU.P	1(R3), R5
-	CMP	R4, R5
-	BEQ	loop
-	// bytes differed
-	MOVD	$1, R4
-	CSNEG	LT, R4, R4, R4
-	MOVD	R4, (R7)
-	RET
-samebytes:
-	MOVD	$1, R4
-	CMP	R0, R1
-	CSNEG	LT, R4, R4, R4
-	CSEL	EQ, ZR, R4, R4
-	MOVD	R4, (R7)
-	RET
-
-// eqstring tests whether two strings are equal.
-// The compiler guarantees that strings passed
-// to eqstring have equal length.
-// See runtime_test.go:eqstring_generic for
-// equivalent Go code.
-TEXT runtime·eqstring(SB),NOSPLIT,$0-33
-	MOVD	s1str+0(FP), R0
-	MOVD	s1len+8(FP), R1
-	MOVD	s2str+16(FP), R2
-	ADD	R0, R1		// end
-loop:
-	CMP	R0, R1
-	BEQ	equal		// reaches the end
-	MOVBU.P	1(R0), R4
-	MOVBU.P	1(R2), R5
-	CMP	R4, R5
-	BEQ	loop
-notequal:
-	MOVB	ZR, ret+32(FP)
-	RET
-equal:
-	MOVD	$1, R0
-	MOVB	R0, ret+32(FP)
-	RET
-
-//
-// functions for other packages
-//
-TEXT bytes·IndexByte(SB),NOSPLIT,$0-40
-	MOVD	b+0(FP), R0
-	MOVD	b_len+8(FP), R1
-	MOVBU	c+24(FP), R2	// byte to find
-	MOVD	R0, R4		// store base for later
-	ADD	R0, R1		// end
-loop:
-	CMP	R0, R1
-	BEQ	notfound
-	MOVBU.P	1(R0), R3
-	CMP	R2, R3
-	BNE	loop
-
-	SUB	$1, R0		// R0 will be one beyond the position we want
-	SUB	R4, R0		// remove base
-	MOVD	R0, ret+32(FP)
-	RET
-
-notfound:
-	MOVD	$-1, R0
-	MOVD	R0, ret+32(FP)
-	RET
-
-TEXT strings·IndexByte(SB),NOSPLIT,$0-32
-	MOVD	s+0(FP), R0
-	MOVD	s_len+8(FP), R1
-	MOVBU	c+16(FP), R2	// byte to find
-	MOVD	R0, R4		// store base for later
-	ADD	R0, R1		// end
-loop:
-	CMP	R0, R1
-	BEQ	notfound
-	MOVBU.P	1(R0), R3
-	CMP	R2, R3
-	BNE	loop
-
-	SUB	$1, R0		// R0 will be one beyond the position we want
-	SUB	R4, R0		// remove base
-	MOVD	R0, ret+24(FP)
-	RET
-
-notfound:
-	MOVD	$-1, R0
-	MOVD	R0, ret+24(FP)
-	RET
-
-// TODO: share code with memequal?
-TEXT bytes·Equal(SB),NOSPLIT,$0-49
-	MOVD	a_len+8(FP), R1
-	MOVD	b_len+32(FP), R3
-	CMP	R1, R3		// unequal lengths are not equal
-	BNE	notequal
-	MOVD	a+0(FP), R0
-	MOVD	b+24(FP), R2
-	ADD	R0, R1		// end
-loop:
-	CMP	R0, R1
-	BEQ	equal		// reaches the end
-	MOVBU.P	1(R0), R4
-	MOVBU.P	1(R2), R5
-	CMP	R4, R5
-	BEQ	loop
-notequal:
-	MOVB	ZR, ret+48(FP)
-	RET
-equal:
-	MOVD	$1, R0
-	MOVB	R0, ret+48(FP)
-	RET
-
-TEXT runtime·fastrand1(SB),NOSPLIT,$-8-4
-	MOVD	g_m(g), R1
-	MOVWU	m_fastrand(R1), R0
-	ADD	R0, R0
-	CMPW	$0, R0
-	BGE	notneg
-	EOR	$0x88888eef, R0
-notneg:
-	MOVW	R0, m_fastrand(R1)
-	MOVW	R0, ret+0(FP)
-	RET
 
 TEXT runtime·return0(SB), NOSPLIT, $0
 	MOVW	$0, R0
@@ -979,25 +1110,12 @@ TEXT runtime·return0(SB), NOSPLIT, $0
 
 // The top-most function running on a goroutine
 // returns to goexit+PCQuantum.
-TEXT runtime·goexit(SB),NOSPLIT,$-8-0
+TEXT runtime·goexit(SB),NOSPLIT|NOFRAME,$0-0
 	MOVD	R0, R0	// NOP
 	BL	runtime·goexit1(SB)	// does not return
 
-// TODO(aram): use PRFM here.
-TEXT runtime·prefetcht0(SB),NOSPLIT,$0-8
+TEXT runtime·sigreturn(SB),NOSPLIT,$0-0
 	RET
-
-TEXT runtime·prefetcht1(SB),NOSPLIT,$0-8
-	RET
-
-TEXT runtime·prefetcht2(SB),NOSPLIT,$0-8
-	RET
-
-TEXT runtime·prefetchnta(SB),NOSPLIT,$0-8
-	RET
-
-TEXT runtime·sigreturn(SB),NOSPLIT,$0-8
-        RET
 
 // This is called from .init_array and follows the platform, not Go, ABI.
 TEXT runtime·addmoduledata(SB),NOSPLIT,$0-0
@@ -1014,3 +1132,102 @@ TEXT ·checkASM(SB),NOSPLIT,$0-1
 	MOVW	$1, R3
 	MOVB	R3, ret+0(FP)
 	RET
+
+// gcWriteBarrier performs a heap pointer write and informs the GC.
+//
+// gcWriteBarrier does NOT follow the Go ABI. It takes two arguments:
+// - R2 is the destination of the write
+// - R3 is the value being written at R2
+// It clobbers condition codes.
+// It does not clobber any general-purpose registers,
+// but may clobber others (e.g., floating point registers)
+// The act of CALLing gcWriteBarrier will clobber R30 (LR).
+TEXT runtime·gcWriteBarrier(SB),NOSPLIT,$216
+	// Save the registers clobbered by the fast path.
+	MOVD	R0, 200(RSP)
+	MOVD	R1, 208(RSP)
+	MOVD	g_m(g), R0
+	MOVD	m_p(R0), R0
+	MOVD	(p_wbBuf+wbBuf_next)(R0), R1
+	// Increment wbBuf.next position.
+	ADD	$16, R1
+	MOVD	R1, (p_wbBuf+wbBuf_next)(R0)
+	MOVD	(p_wbBuf+wbBuf_end)(R0), R0
+	CMP	R1, R0
+	// Record the write.
+	MOVD	R3, -16(R1)	// Record value
+	MOVD	(R2), R0	// TODO: This turns bad writes into bad reads.
+	MOVD	R0, -8(R1)	// Record *slot
+	// Is the buffer full? (flags set in CMP above)
+	BEQ	flush
+ret:
+	MOVD	200(RSP), R0
+	MOVD	208(RSP), R1
+	// Do the write.
+	MOVD	R3, (R2)
+	RET
+
+flush:
+	// Save all general purpose registers since these could be
+	// clobbered by wbBufFlush and were not saved by the caller.
+	MOVD	R2, 8(RSP)	// Also first argument to wbBufFlush
+	MOVD	R3, 16(RSP)	// Also second argument to wbBufFlush
+	// R0 already saved
+	// R1 already saved
+	MOVD	R4, 24(RSP)
+	MOVD	R5, 32(RSP)
+	MOVD	R6, 40(RSP)
+	MOVD	R7, 48(RSP)
+	MOVD	R8, 56(RSP)
+	MOVD	R9, 64(RSP)
+	MOVD	R10, 72(RSP)
+	MOVD	R11, 80(RSP)
+	MOVD	R12, 88(RSP)
+	MOVD	R13, 96(RSP)
+	MOVD	R14, 104(RSP)
+	MOVD	R15, 112(RSP)
+	MOVD	R16, 120(RSP)
+	MOVD	R17, 128(RSP)
+	// R18 is unused.
+	MOVD	R19, 136(RSP)
+	MOVD	R20, 144(RSP)
+	MOVD	R21, 152(RSP)
+	MOVD	R22, 160(RSP)
+	MOVD	R23, 168(RSP)
+	MOVD	R24, 176(RSP)
+	MOVD	R25, 184(RSP)
+	MOVD	R26, 192(RSP)
+	// R27 is temp register.
+	// R28 is g.
+	// R29 is frame pointer (unused).
+	// R30 is LR, which was saved by the prologue.
+	// R31 is SP.
+
+	// This takes arguments R2 and R3.
+	CALL	runtime·wbBufFlush(SB)
+
+	MOVD	8(RSP), R2
+	MOVD	16(RSP), R3
+	MOVD	24(RSP), R4
+	MOVD	32(RSP), R5
+	MOVD	40(RSP), R6
+	MOVD	48(RSP), R7
+	MOVD	56(RSP), R8
+	MOVD	64(RSP), R9
+	MOVD	72(RSP), R10
+	MOVD	80(RSP), R11
+	MOVD	88(RSP), R12
+	MOVD	96(RSP), R13
+	MOVD	104(RSP), R14
+	MOVD	112(RSP), R15
+	MOVD	120(RSP), R16
+	MOVD	128(RSP), R17
+	MOVD	136(RSP), R19
+	MOVD	144(RSP), R20
+	MOVD	152(RSP), R21
+	MOVD	160(RSP), R22
+	MOVD	168(RSP), R23
+	MOVD	176(RSP), R24
+	MOVD	184(RSP), R25
+	MOVD	192(RSP), R26
+	JMP	ret

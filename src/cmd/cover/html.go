@@ -7,15 +7,15 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmd/internal/browser"
 	"fmt"
 	"html/template"
 	"io"
 	"io/ioutil"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
+	"strings"
 )
 
 // htmlOutput reads the profile data from profile and generates an HTML
@@ -29,12 +29,17 @@ func htmlOutput(profile, outfile string) error {
 
 	var d templateData
 
+	dirs, err := findPkgs(profiles)
+	if err != nil {
+		return err
+	}
+
 	for _, profile := range profiles {
 		fn := profile.FileName
 		if profile.Mode == "set" {
 			d.Set = true
 		}
-		file, err := findFile(fn)
+		file, err := findFile(dirs, fn)
 		if err != nil {
 			return err
 		}
@@ -42,7 +47,7 @@ func htmlOutput(profile, outfile string) error {
 		if err != nil {
 			return fmt.Errorf("can't read %q: %v", fn, err)
 		}
-		var buf bytes.Buffer
+		var buf strings.Builder
 		err = htmlGen(&buf, src, profile.Boundaries(src))
 		if err != nil {
 			return err
@@ -65,16 +70,19 @@ func htmlOutput(profile, outfile string) error {
 	} else {
 		out, err = os.Create(outfile)
 	}
+	if err != nil {
+		return err
+	}
 	err = htmlTemplate.Execute(out, d)
-	if err == nil {
-		err = out.Close()
+	if err2 := out.Close(); err == nil {
+		err = err2
 	}
 	if err != nil {
 		return err
 	}
 
 	if outfile == "" {
-		if !startBrowser("file://" + out.Name()) {
+		if !browser.Open("file://" + out.Name()) {
 			fmt.Fprintf(os.Stderr, "HTML output written to %s\n", out.Name())
 		}
 	}
@@ -131,23 +139,6 @@ func htmlGen(w io.Writer, src []byte, boundaries []Boundary) error {
 		}
 	}
 	return dst.Flush()
-}
-
-// startBrowser tries to open the URL in a browser
-// and reports whether it succeeds.
-func startBrowser(url string) bool {
-	// try to start the browser
-	var args []string
-	switch runtime.GOOS {
-	case "darwin":
-		args = []string{"open"}
-	case "windows":
-		args = []string{"cmd", "/c", "start"}
-	default:
-		args = []string{"xdg-open"}
-	}
-	cmd := exec.Command(args[0], append(args[1:], url)...)
-	return cmd.Start() == nil
 }
 
 // rgb returns an rgb value for the specified coverage value

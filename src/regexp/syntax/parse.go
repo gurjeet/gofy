@@ -381,7 +381,7 @@ func (p *parser) collapse(subs []*Regexp, op Op) *Regexp {
 		}
 	}
 	if op == OpAlternate {
-		re.Sub = p.factor(re.Sub, re.Flags)
+		re.Sub = p.factor(re.Sub)
 		if len(re.Sub) == 1 {
 			old := re
 			re = re.Sub[0]
@@ -402,7 +402,7 @@ func (p *parser) collapse(subs []*Regexp, op Op) *Regexp {
 // which simplifies by character class introduction to
 //     A(B[CD]|EF)|BC[XY]
 //
-func (p *parser) factor(sub []*Regexp, flags Flags) []*Regexp {
+func (p *parser) factor(sub []*Regexp) []*Regexp {
 	if len(sub) < 2 {
 		return sub
 	}
@@ -1692,7 +1692,7 @@ const (
 	// minimum and maximum runes involved in folding.
 	// checked during test.
 	minFold = 0x0041
-	maxFold = 0x118df
+	maxFold = 0x1e943
 )
 
 // appendFoldedRange returns the result of appending the range lo-hi

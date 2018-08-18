@@ -5,21 +5,21 @@
 #include "textflag.h"
 
 // uint32 runtime∕internal∕atomic·Load(uint32 volatile* addr)
-TEXT ·Load(SB),NOSPLIT,$-8-12
+TEXT ·Load(SB),NOSPLIT,$0-12
 	MOVD	ptr+0(FP), R0
 	LDARW	(R0), R0
 	MOVW	R0, ret+8(FP)
 	RET
 
 // uint64 runtime∕internal∕atomic·Load64(uint64 volatile* addr)
-TEXT ·Load64(SB),NOSPLIT,$-8-16
+TEXT ·Load64(SB),NOSPLIT,$0-16
 	MOVD	ptr+0(FP), R0
 	LDAR	(R0), R0
 	MOVD	R0, ret+8(FP)
 	RET
 
 // void *runtime∕internal∕atomic·Loadp(void *volatile *addr)
-TEXT ·Loadp(SB),NOSPLIT,$-8-16
+TEXT ·Loadp(SB),NOSPLIT,$0-16
 	MOVD	ptr+0(FP), R0
 	LDAR	(R0), R0
 	MOVD	R0, ret+8(FP)
@@ -111,3 +111,22 @@ again:
 
 TEXT runtime∕internal∕atomic·Xchguintptr(SB), NOSPLIT, $0-24
 	B	runtime∕internal∕atomic·Xchg64(SB)
+
+TEXT ·And8(SB), NOSPLIT, $0-9
+	MOVD	ptr+0(FP), R0
+	MOVB	val+8(FP), R1
+	LDAXRB	(R0), R2
+	AND	R1, R2
+	STLXRB	R2, (R0), R3
+	CBNZ	R3, -3(PC)
+	RET
+
+TEXT ·Or8(SB), NOSPLIT, $0-9
+	MOVD	ptr+0(FP), R0
+	MOVB	val+8(FP), R1
+	LDAXRB	(R0), R2
+	ORR	R1, R2
+	STLXRB	R2, (R0), R3
+	CBNZ	R3, -3(PC)
+	RET
+

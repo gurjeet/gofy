@@ -274,6 +274,7 @@ var unquotetests = []unQuoteTest{
 	{"`\n`", "\n"},
 	{"`	`", `	`},
 	{"` `", ` `},
+	{"`a\rb`", "ab"},
 }
 
 var misquoted = []string{
@@ -306,7 +307,7 @@ var misquoted = []string{
 
 func TestUnquote(t *testing.T) {
 	for _, tt := range unquotetests {
-		if out, err := Unquote(tt.in); err != nil && out != tt.out {
+		if out, err := Unquote(tt.in); err != nil || out != tt.out {
 			t.Errorf("Unquote(%#q) = %q, %v want %q, nil", tt.in, out, err, tt.out)
 		}
 	}
@@ -321,6 +322,36 @@ func TestUnquote(t *testing.T) {
 	for _, s := range misquoted {
 		if out, err := Unquote(s); out != "" || err != ErrSyntax {
 			t.Errorf("Unquote(%#q) = %q, %v want %q, %v", s, out, err, "", ErrSyntax)
+		}
+	}
+}
+
+// Issue 23685: invalid UTF-8 should not go through the fast path.
+func TestUnquoteInvalidUTF8(t *testing.T) {
+	tests := []struct {
+		in string
+
+		// one of:
+		want    string
+		wantErr string
+	}{
+		{in: `"foo"`, want: "foo"},
+		{in: `"foo`, wantErr: "invalid syntax"},
+		{in: `"` + "\xc0" + `"`, want: "\xef\xbf\xbd"},
+		{in: `"a` + "\xc0" + `"`, want: "a\xef\xbf\xbd"},
+		{in: `"\t` + "\xc0" + `"`, want: "\t\xef\xbf\xbd"},
+	}
+	for i, tt := range tests {
+		got, err := Unquote(tt.in)
+		var gotErr string
+		if err != nil {
+			gotErr = err.Error()
+		}
+		if gotErr != tt.wantErr {
+			t.Errorf("%d. Unquote(%q) = err %v; want %q", i, tt.in, err, tt.wantErr)
+		}
+		if tt.wantErr == "" && err == nil && got != tt.want {
+			t.Errorf("%d. Unquote(%q) = %02x; want %02x", i, tt.in, []byte(got), []byte(tt.want))
 		}
 	}
 }

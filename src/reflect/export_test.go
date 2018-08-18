@@ -93,7 +93,7 @@ func FirstMethodNameBytes(t Type) *byte {
 	}
 	m := ut.methods()[0]
 	mname := t.(*rtype).nameOff(m.name)
-	if *mname.data(0)&(1<<2) == 0 {
+	if *mname.data(0, "name flag field")&(1<<2) == 0 {
 		panic("method name does not have pkgPath *string")
 	}
 	return mname.bytes
@@ -108,4 +108,12 @@ func IsExported(t Type) bool {
 	typ := t.(*rtype)
 	n := typ.nameOff(typ.str)
 	return n.isExported()
+}
+
+func ResolveReflectName(s string) {
+	resolveReflectName(newName(s, "", false))
+}
+
+type Buffer struct {
+	buf []byte
 }

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build darwin dragonfly freebsd linux nacl netbsd openbsd solaris windows
+// +build darwin dragonfly freebsd js,wasm linux nacl netbsd openbsd solaris windows
 
 package net
 
@@ -16,7 +16,7 @@ func sockaddrToUDP(sa syscall.Sockaddr) Addr {
 	case *syscall.SockaddrInet4:
 		return &UDPAddr{IP: sa.Addr[0:], Port: sa.Port}
 	case *syscall.SockaddrInet6:
-		return &UDPAddr{IP: sa.Addr[0:], Port: sa.Port, Zone: zoneToString(int(sa.ZoneId))}
+		return &UDPAddr{IP: sa.Addr[0:], Port: sa.Port, Zone: zoneCache.name(int(sa.ZoneId))}
 	}
 	return nil
 }
@@ -38,6 +38,10 @@ func (a *UDPAddr) sockaddr(family int) (syscall.Sockaddr, error) {
 	return ipToSockaddr(family, a.IP, a.Port, a.Zone)
 }
 
+func (a *UDPAddr) toLocal(net string) sockaddr {
+	return &UDPAddr{loopbackIP(net), a.Port, a.Zone}
+}
+
 func (c *UDPConn) readFrom(b []byte) (int, *UDPAddr, error) {
 	var addr *UDPAddr
 	n, sa, err := c.fd.readFrom(b)
@@ -45,7 +49,7 @@ func (c *UDPConn) readFrom(b []byte) (int, *UDPAddr, error) {
 	case *syscall.SockaddrInet4:
 		addr = &UDPAddr{IP: sa.Addr[0:], Port: sa.Port}
 	case *syscall.SockaddrInet6:
-		addr = &UDPAddr{IP: sa.Addr[0:], Port: sa.Port, Zone: zoneToString(int(sa.ZoneId))}
+		addr = &UDPAddr{IP: sa.Addr[0:], Port: sa.Port, Zone: zoneCache.name(int(sa.ZoneId))}
 	}
 	return n, addr, err
 }
@@ -57,7 +61,7 @@ func (c *UDPConn) readMsg(b, oob []byte) (n, oobn, flags int, addr *UDPAddr, err
 	case *syscall.SockaddrInet4:
 		addr = &UDPAddr{IP: sa.Addr[0:], Port: sa.Port}
 	case *syscall.SockaddrInet6:
-		addr = &UDPAddr{IP: sa.Addr[0:], Port: sa.Port, Zone: zoneToString(int(sa.ZoneId))}
+		addr = &UDPAddr{IP: sa.Addr[0:], Port: sa.Port, Zone: zoneCache.name(int(sa.ZoneId))}
 	}
 	return
 }
@@ -90,24 +94,24 @@ func (c *UDPConn) writeMsg(b, oob []byte, addr *UDPAddr) (n, oobn int, err error
 	return c.fd.writeMsg(b, oob, sa)
 }
 
-func dialUDP(ctx context.Context, net string, laddr, raddr *UDPAddr) (*UDPConn, error) {
-	fd, err := internetSocket(ctx, net, laddr, raddr, syscall.SOCK_DGRAM, 0, "dial")
+func (sd *sysDialer) dialUDP(ctx context.Context, laddr, raddr *UDPAddr) (*UDPConn, error) {
+	fd, err := internetSocket(ctx, sd.network, laddr, raddr, syscall.SOCK_DGRAM, 0, "dial", sd.Dialer.Control)
 	if err != nil {
 		return nil, err
 	}
 	return newUDPConn(fd), nil
 }
 
-func listenUDP(ctx context.Context, network string, laddr *UDPAddr) (*UDPConn, error) {
-	fd, err := internetSocket(ctx, network, laddr, nil, syscall.SOCK_DGRAM, 0, "listen")
+func (sl *sysListener) listenUDP(ctx context.Context, laddr *UDPAddr) (*UDPConn, error) {
+	fd, err := internetSocket(ctx, sl.network, laddr, nil, syscall.SOCK_DGRAM, 0, "listen", sl.ListenConfig.Control)
 	if err != nil {
 		return nil, err
 	}
 	return newUDPConn(fd), nil
 }
 
-func listenMulticastUDP(ctx context.Context, network string, ifi *Interface, gaddr *UDPAddr) (*UDPConn, error) {
-	fd, err := internetSocket(ctx, network, gaddr, nil, syscall.SOCK_DGRAM, 0, "listen")
+func (sl *sysListener) listenMulticastUDP(ctx context.Context, ifi *Interface, gaddr *UDPAddr) (*UDPConn, error) {
+	fd, err := internetSocket(ctx, sl.network, gaddr, nil, syscall.SOCK_DGRAM, 0, "listen", sl.ListenConfig.Control)
 	if err != nil {
 		return nil, err
 	}

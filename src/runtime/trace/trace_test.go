@@ -6,18 +6,87 @@ package trace_test
 
 import (
 	"bytes"
+	"flag"
+	"internal/race"
 	"internal/trace"
 	"io"
+	"io/ioutil"
 	"net"
 	"os"
 	"runtime"
 	. "runtime/trace"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 )
 
+var (
+	saveTraces = flag.Bool("savetraces", false, "save traces collected by tests")
+)
+
+// TestEventBatch tests Flush calls that happen during Start
+// don't produce corrupted traces.
+func TestEventBatch(t *testing.T) {
+	if race.Enabled {
+		t.Skip("skipping in race mode")
+	}
+	if IsEnabled() {
+		t.Skip("skipping because -test.trace is set")
+	}
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	// During Start, bunch of records are written to reflect the current
+	// snapshot of the program, including state of each goroutines.
+	// And some string constants are written to the trace to aid trace
+	// parsing. This test checks Flush of the buffer occurred during
+	// this process doesn't cause corrupted traces.
+	// When a Flush is called during Start is complicated
+	// so we test with a range of number of goroutines hoping that one
+	// of them triggers Flush.
+	// This range was chosen to fill up a ~64KB buffer with traceEvGoCreate
+	// and traceEvGoWaiting events (12~13bytes per goroutine).
+	for g := 4950; g < 5050; g++ {
+		n := g
+		t.Run("G="+strconv.Itoa(n), func(t *testing.T) {
+			var wg sync.WaitGroup
+			wg.Add(n)
+
+			in := make(chan bool, 1000)
+			for i := 0; i < n; i++ {
+				go func() {
+					<-in
+					wg.Done()
+				}()
+			}
+			buf := new(bytes.Buffer)
+			if err := Start(buf); err != nil {
+				t.Fatalf("failed to start tracing: %v", err)
+			}
+
+			for i := 0; i < n; i++ {
+				in <- true
+			}
+			wg.Wait()
+			Stop()
+
+			_, err := trace.Parse(buf, "")
+			if err == trace.ErrTimeOrder {
+				t.Skipf("skipping trace: %v", err)
+			}
+
+			if err != nil {
+				t.Fatalf("failed to parse trace: %v", err)
+			}
+		})
+	}
+}
+
 func TestTraceStartStop(t *testing.T) {
+	if IsEnabled() {
+		t.Skip("skipping because -test.trace is set")
+	}
 	buf := new(bytes.Buffer)
 	if err := Start(buf); err != nil {
 		t.Fatalf("failed to start tracing: %v", err)
@@ -31,9 +100,13 @@ func TestTraceStartStop(t *testing.T) {
 	if size != buf.Len() {
 		t.Fatalf("trace writes after stop: %v -> %v", size, buf.Len())
 	}
+	saveTrace(t, buf, "TestTraceStartStop")
 }
 
 func TestTraceDoubleStart(t *testing.T) {
+	if IsEnabled() {
+		t.Skip("skipping because -test.trace is set")
+	}
 	Stop()
 	buf := new(bytes.Buffer)
 	if err := Start(buf); err != nil {
@@ -47,11 +120,15 @@ func TestTraceDoubleStart(t *testing.T) {
 }
 
 func TestTrace(t *testing.T) {
+	if IsEnabled() {
+		t.Skip("skipping because -test.trace is set")
+	}
 	buf := new(bytes.Buffer)
 	if err := Start(buf); err != nil {
 		t.Fatalf("failed to start tracing: %v", err)
 	}
 	Stop()
+	saveTrace(t, buf, "TestTrace")
 	_, err := trace.Parse(buf, "")
 	if err == trace.ErrTimeOrder {
 		t.Skipf("skipping trace: %v", err)
@@ -62,20 +139,20 @@ func TestTrace(t *testing.T) {
 }
 
 func parseTrace(t *testing.T, r io.Reader) ([]*trace.Event, map[uint64]*trace.GDesc) {
-	events, err := trace.Parse(r, "")
+	res, err := trace.Parse(r, "")
 	if err == trace.ErrTimeOrder {
 		t.Skipf("skipping trace: %v", err)
 	}
 	if err != nil {
 		t.Fatalf("failed to parse trace: %v", err)
 	}
-	gs := trace.GoroutineStats(events)
+	gs := trace.GoroutineStats(res.Events)
 	for goid := range gs {
 		// We don't do any particular checks on the result at the moment.
 		// But still check that RelatedGoroutines does not crash, hang, etc.
-		_ = trace.RelatedGoroutines(events, goid)
+		_ = trace.RelatedGoroutines(res.Events, goid)
 	}
-	return events, gs
+	return res.Events, gs
 }
 
 func testBrokenTimestamps(t *testing.T, data []byte) {
@@ -103,6 +180,12 @@ func testBrokenTimestamps(t *testing.T, data []byte) {
 }
 
 func TestTraceStress(t *testing.T) {
+	if runtime.GOOS == "js" {
+		t.Skip("no os.Pipe on js")
+	}
+	if IsEnabled() {
+		t.Skip("skipping because -test.trace is set")
+	}
 	var wg sync.WaitGroup
 	done := make(chan bool)
 
@@ -233,6 +316,7 @@ func TestTraceStress(t *testing.T) {
 	runtime.GOMAXPROCS(procs)
 
 	Stop()
+	saveTrace(t, buf, "TestTraceStress")
 	trace := buf.Bytes()
 	parseTrace(t, buf)
 	testBrokenTimestamps(t, trace)
@@ -241,6 +325,12 @@ func TestTraceStress(t *testing.T) {
 // Do a bunch of various stuff (timers, GC, network, etc) in a separate goroutine.
 // And concurrently with all that start/stop trace 3 times.
 func TestTraceStressStartStop(t *testing.T) {
+	if runtime.GOOS == "js" {
+		t.Skip("no os.Pipe on js")
+	}
+	if IsEnabled() {
+		t.Skip("skipping because -test.trace is set")
+	}
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(8))
 	outerDone := make(chan bool)
 
@@ -260,7 +350,8 @@ func TestTraceStressStartStop(t *testing.T) {
 
 		rp, wp, err := os.Pipe()
 		if err != nil {
-			t.Fatalf("failed to create pipe: %v", err)
+			t.Errorf("failed to create pipe: %v", err)
+			return
 		}
 		defer func() {
 			rp.Close()
@@ -336,7 +427,8 @@ func TestTraceStressStartStop(t *testing.T) {
 		// A bit of network.
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
-			t.Fatalf("listen failed: %v", err)
+			t.Errorf("listen failed: %v", err)
+			return
 		}
 		defer ln.Close()
 		go func() {
@@ -351,7 +443,8 @@ func TestTraceStressStartStop(t *testing.T) {
 		}()
 		c, err := net.Dial("tcp", ln.Addr().String())
 		if err != nil {
-			t.Fatalf("dial failed: %v", err)
+			t.Errorf("dial failed: %v", err)
+			return
 		}
 		var tmp [1]byte
 		c.Read(tmp[:])
@@ -376,6 +469,7 @@ func TestTraceStressStartStop(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 		Stop()
+		saveTrace(t, buf, "TestTraceStressStartStop")
 		trace := buf.Bytes()
 		parseTrace(t, buf)
 		testBrokenTimestamps(t, trace)
@@ -384,6 +478,9 @@ func TestTraceStressStartStop(t *testing.T) {
 }
 
 func TestTraceFutileWakeup(t *testing.T) {
+	if IsEnabled() {
+		t.Skip("skipping because -test.trace is set")
+	}
 	buf := new(bytes.Buffer)
 	if err := Start(buf); err != nil {
 		t.Fatalf("failed to start tracing: %v", err)
@@ -436,6 +533,7 @@ func TestTraceFutileWakeup(t *testing.T) {
 	done.Wait()
 
 	Stop()
+	saveTrace(t, buf, "TestTraceFutileWakeup")
 	events, _ := parseTrace(t, buf)
 	// Check that (1) trace does not contain EvFutileWakeup events and
 	// (2) there are no consecutive EvGoBlock/EvGCStart/EvGoBlock events
@@ -462,5 +560,14 @@ func TestTraceFutileWakeup(t *testing.T) {
 		default:
 			delete(gs, ev.G)
 		}
+	}
+}
+
+func saveTrace(t *testing.T, buf *bytes.Buffer, name string) {
+	if !*saveTraces {
+		return
+	}
+	if err := ioutil.WriteFile(name+".trace", buf.Bytes(), 0600); err != nil {
+		t.Errorf("failed to write trace file: %s", err)
 	}
 }

@@ -1,5 +1,5 @@
 // Inferno's libkern/memmove-386.s
-// http://code.google.com/p/inferno-os/source/browse/libkern/memmove-386.s
+// https://bitbucket.org/inferno-os/inferno-os/src/default/libkern/memmove-386.s
 //
 //         Copyright © 1994-1999 Lucent Technologies Inc. All rights reserved.
 //         Revisions Copyright © 2000-2007 Vita Nuova Holdings Limited (www.vitanuova.com).  All rights reserved.
@@ -25,6 +25,7 @@
 
 #include "textflag.h"
 
+// func memmove(to, from unsafe.Pointer, n uintptr)
 TEXT runtime·memmove(SB), NOSPLIT, $0-12
 	MOVL	to+0(FP), DI
 	MOVL	from+4(FP), SI

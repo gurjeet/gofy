@@ -6,6 +6,7 @@ package runtime
 
 import (
 	"runtime/internal/atomic"
+	"runtime/internal/sys"
 	"unsafe"
 )
 
@@ -17,19 +18,32 @@ type mOS struct {
 func setitimer(mode int32, new, old *itimerval)
 
 //go:noescape
-func sigaction(sig int32, new, old *sigactiont)
+func sigaction(sig uint32, new, old *sigactiont)
 
 //go:noescape
 func sigaltstack(new, old *stackt)
 
 //go:noescape
-func sigprocmask(mode int32, new sigset) sigset
+func obsdsigprocmask(how int32, new sigset) sigset
+
+//go:nosplit
+//go:nowritebarrierrec
+func sigprocmask(how int32, new, old *sigset) {
+	n := sigset(0)
+	if new != nil {
+		n = *new
+	}
+	r := obsdsigprocmask(how, n)
+	if old != nil {
+		*old = r
+	}
+}
 
 //go:noescape
 func sysctl(mib *uint32, miblen uint32, out *byte, size *uintptr, dst *byte, ndst uintptr) int32
 
-func raise(sig int32)
-func raiseproc(sig int32)
+func raise(sig uint32)
+func raiseproc(sig uint32)
 
 //go:noescape
 func tfork(param *tforkt, psize uintptr, mm *m, gg *g, fn uintptr) int32
@@ -41,6 +55,12 @@ func thrsleep(ident uintptr, clock_id int32, tsp *timespec, lock uintptr, abort 
 func thrwakeup(ident uintptr, n int32) int32
 
 func osyield()
+
+func kqueue() int32
+
+//go:noescape
+func kevent(kq int32, ch *keventt, nch int32, ev *keventt, nev int32, ts *timespec) int32
+func closeonexec(fd int32)
 
 const (
 	_ESRCH       = 3
@@ -57,28 +77,48 @@ const (
 
 type sigset uint32
 
-const (
-	sigset_none = sigset(0)
-	sigset_all  = ^sigset(0)
-)
+var sigset_all = ^sigset(0)
 
 // From OpenBSD's <sys/sysctl.h>
 const (
-	_CTL_HW  = 6
-	_HW_NCPU = 3
+	_CTL_KERN   = 1
+	_KERN_OSREV = 3
+
+	_CTL_HW      = 6
+	_HW_NCPU     = 3
+	_HW_PAGESIZE = 7
 )
 
-func getncpu() int32 {
-	mib := [2]uint32{_CTL_HW, _HW_NCPU}
-	out := uint32(0)
+func sysctlInt(mib []uint32) (int32, bool) {
+	var out int32
 	nout := unsafe.Sizeof(out)
+	ret := sysctl(&mib[0], uint32(len(mib)), (*byte)(unsafe.Pointer(&out)), &nout, nil, 0)
+	if ret < 0 {
+		return 0, false
+	}
+	return out, true
+}
 
+func getncpu() int32 {
 	// Fetch hw.ncpu via sysctl.
-	ret := sysctl(&mib[0], 2, (*byte)(unsafe.Pointer(&out)), &nout, nil, 0)
-	if ret >= 0 {
-		return int32(out)
+	if ncpu, ok := sysctlInt([]uint32{_CTL_HW, _HW_NCPU}); ok {
+		return int32(ncpu)
 	}
 	return 1
+}
+
+func getPageSize() uintptr {
+	if ps, ok := sysctlInt([]uint32{_CTL_HW, _HW_PAGESIZE}); ok {
+		return uintptr(ps)
+	}
+	return 0
+}
+
+func getOSRev() int {
+	if osrev, ok := sysctlInt([]uint32{_CTL_KERN, _KERN_OSREV}); ok {
+		return int(osrev)
+	}
+	return 0
 }
 
 //go:nosplit
@@ -137,29 +177,38 @@ func semawakeup(mp *m) {
 
 // May run with m.p==nil, so write barriers are not allowed.
 //go:nowritebarrier
-func newosproc(mp *m, stk unsafe.Pointer) {
+func newosproc(mp *m) {
+	stk := unsafe.Pointer(mp.g0.stack.hi)
 	if false {
 		print("newosproc stk=", stk, " m=", mp, " g=", mp.g0, " id=", mp.id, " ostk=", &mp, "\n")
 	}
 
+	// Stack pointer must point inside stack area (as marked with MAP_STACK),
+	// rather than at the top of it.
 	param := tforkt{
 		tf_tcb:   unsafe.Pointer(&mp.tls[0]),
 		tf_tid:   (*int32)(unsafe.Pointer(&mp.procid)),
-		tf_stack: uintptr(stk),
+		tf_stack: uintptr(stk) - sys.PtrSize,
 	}
 
-	oset := sigprocmask(_SIG_SETMASK, sigset_all)
+	var oset sigset
+	sigprocmask(_SIG_SETMASK, &sigset_all, &oset)
 	ret := tfork(&param, unsafe.Sizeof(param), mp, mp.g0, funcPC(mstart))
-	sigprocmask(_SIG_SETMASK, oset)
+	sigprocmask(_SIG_SETMASK, &oset, nil)
 
 	if ret < 0 {
 		print("runtime: failed to create new OS thread (have ", mcount()-1, " already; errno=", -ret, ")\n")
+		if ret == -_EAGAIN {
+			println("runtime: may need to increase max user processes (ulimit -p)")
+		}
 		throw("runtime.newosproc")
 	}
 }
 
 func osinit() {
 	ncpu = getncpu()
+	physPageSize = getPageSize()
+	haveMapStack = getOSRev() >= 201805 // OpenBSD 6.3
 }
 
 var urandom_dev = []byte("/dev/urandom\x00")
@@ -183,66 +232,20 @@ func mpreinit(mp *m) {
 	mp.gsignal.m = mp
 }
 
-//go:nosplit
-func msigsave(mp *m) {
-	mp.sigmask = sigprocmask(_SIG_BLOCK, 0)
-}
-
-//go:nosplit
-func msigrestore(sigmask sigset) {
-	sigprocmask(_SIG_SETMASK, sigmask)
-}
-
-//go:nosplit
-func sigblock() {
-	sigprocmask(_SIG_SETMASK, sigset_all)
-}
-
 // Called to initialize a new m (including the bootstrap m).
 // Called on the new thread, can not allocate memory.
 func minit() {
-	_g_ := getg()
-
 	// m.procid is a uint64, but tfork writes an int32. Fix it up.
+	_g_ := getg()
 	_g_.m.procid = uint64(*(*int32)(unsafe.Pointer(&_g_.m.procid)))
 
-	// Initialize signal handling
-	var st stackt
-	sigaltstack(nil, &st)
-	if st.ss_flags&_SS_DISABLE != 0 {
-		signalstack(&_g_.m.gsignal.stack)
-		_g_.m.newSigstack = true
-	} else {
-		// Use existing signal stack.
-		stsp := uintptr(unsafe.Pointer(st.ss_sp))
-		_g_.m.gsignal.stack.lo = stsp
-		_g_.m.gsignal.stack.hi = stsp + st.ss_size
-		_g_.m.gsignal.stackguard0 = stsp + _StackGuard
-		_g_.m.gsignal.stackguard1 = stsp + _StackGuard
-		_g_.m.gsignal.stackAlloc = st.ss_size
-		_g_.m.newSigstack = false
-	}
-
-	// restore signal mask from m.sigmask and unblock essential signals
-	nmask := _g_.m.sigmask
-	for i := range sigtable {
-		if sigtable[i].flags&_SigUnblock != 0 {
-			nmask &^= 1 << (uint32(i) - 1)
-		}
-	}
-	sigprocmask(_SIG_SETMASK, nmask)
+	minitSignals()
 }
 
 // Called from dropm to undo the effect of an minit.
 //go:nosplit
 func unminit() {
-	if getg().m.newSigstack {
-		signalstack(nil)
-	}
-}
-
-func memlimit() uintptr {
-	return 0
+	unminitSignals()
 }
 
 func sigtramp()
@@ -255,12 +258,9 @@ type sigactiont struct {
 
 //go:nosplit
 //go:nowritebarrierrec
-func setsig(i int32, fn uintptr, restart bool) {
+func setsig(i uint32, fn uintptr) {
 	var sa sigactiont
-	sa.sa_flags = _SA_SIGINFO | _SA_ONSTACK
-	if restart {
-		sa.sa_flags |= _SA_RESTART
-	}
+	sa.sa_flags = _SA_SIGINFO | _SA_ONSTACK | _SA_RESTART
 	sa.sa_mask = uint32(sigset_all)
 	if fn == funcPC(sighandler) {
 		fn = funcPC(sigtramp)
@@ -271,41 +271,65 @@ func setsig(i int32, fn uintptr, restart bool) {
 
 //go:nosplit
 //go:nowritebarrierrec
-func setsigstack(i int32) {
+func setsigstack(i uint32) {
 	throw("setsigstack")
 }
 
 //go:nosplit
 //go:nowritebarrierrec
-func getsig(i int32) uintptr {
+func getsig(i uint32) uintptr {
 	var sa sigactiont
 	sigaction(i, nil, &sa)
-	if sa.sa_sigaction == funcPC(sigtramp) {
-		return funcPC(sighandler)
-	}
 	return sa.sa_sigaction
 }
 
+// setSignaltstackSP sets the ss_sp field of a stackt.
 //go:nosplit
-func signalstack(s *stack) {
-	var st stackt
-	if s == nil {
-		st.ss_flags = _SS_DISABLE
-	} else {
-		st.ss_sp = s.lo
-		st.ss_size = s.hi - s.lo
-		st.ss_flags = 0
-	}
-	sigaltstack(&st, nil)
+func setSignalstackSP(s *stackt, sp uintptr) {
+	s.ss_sp = sp
 }
 
 //go:nosplit
 //go:nowritebarrierrec
-func updatesigmask(m sigmask) {
-	sigprocmask(_SIG_SETMASK, sigset(m[0]))
+func sigaddset(mask *sigset, i int) {
+	*mask |= 1 << (uint32(i) - 1)
 }
 
-func unblocksig(sig int32) {
-	mask := sigset(1) << (uint32(sig) - 1)
-	sigprocmask(_SIG_UNBLOCK, mask)
+func sigdelset(mask *sigset, i int) {
+	*mask &^= 1 << (uint32(i) - 1)
+}
+
+func (c *sigctxt) fixsigcode(sig uint32) {
+}
+
+var haveMapStack = false
+
+func osStackAlloc(s *mspan) {
+	// OpenBSD 6.4+ requires that stacks be mapped with MAP_STACK.
+	// It will check this on entry to system calls, traps, and
+	// when switching to the alternate system stack.
+	//
+	// This function is called before s is used for any data, so
+	// it's safe to simply re-map it.
+	osStackRemap(s, _MAP_STACK)
+}
+
+func osStackFree(s *mspan) {
+	// Undo MAP_STACK.
+	osStackRemap(s, 0)
+}
+
+func osStackRemap(s *mspan, flags int32) {
+	if !haveMapStack {
+		// OpenBSD prior to 6.3 did not have MAP_STACK and so
+		// the following mmap will fail. But it also didn't
+		// require MAP_STACK (obviously), so there's no need
+		// to do the mmap.
+		return
+	}
+	a, err := mmap(unsafe.Pointer(s.base()), s.npages*pageSize, _PROT_READ|_PROT_WRITE, _MAP_PRIVATE|_MAP_ANON|_MAP_FIXED|flags, -1, 0)
+	if err != 0 || uintptr(a) != s.base() {
+		print("runtime: remapping stack memory ", hex(s.base()), " ", s.npages*pageSize, " a=", a, " err=", err, "\n")
+		throw("remapping stack memory failed")
+	}
 }

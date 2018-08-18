@@ -102,10 +102,12 @@ type Closer interface {
 // Seeker is the interface that wraps the basic Seek method.
 //
 // Seek sets the offset for the next Read or Write to offset,
-// interpreted according to whence: 0 means relative to the start of
-// the file, 1 means relative to the current offset, and 2 means
-// relative to the end. Seek returns the new offset relative to the
-// start of the file and an error, if any.
+// interpreted according to whence:
+// SeekStart means relative to the start of the file,
+// SeekCurrent means relative to the current offset, and
+// SeekEnd means relative to the end.
+// Seek returns the new offset relative to the start of the
+// file and an error, if any.
 //
 // Seeking to an offset before the start of the file is an error.
 // Seeking to any positive offset is legal, but the behavior of subsequent
@@ -231,7 +233,9 @@ type WriterAt interface {
 
 // ByteReader is the interface that wraps the ReadByte method.
 //
-// ReadByte reads and returns the next byte from the input.
+// ReadByte reads and returns the next byte from the input or
+// any error encountered. If ReadByte returns an error, no input
+// byte was consumed, and the returned byte value is undefined.
 type ByteReader interface {
 	ReadByte() (byte, error)
 }
@@ -274,16 +278,6 @@ type RuneScanner interface {
 	UnreadRune() error
 }
 
-// SizedReaderAt is the interface that groups the basic ReadAt method
-// with a Size method that reports the total size of the underlying
-// object. It represents a fixed-size data source that supports random
-// access by multiple concurrent goroutines.
-type SizedReaderAt interface {
-	ReaderAt
-	// Size reports the length of the data source in bytes.
-	Size() int64
-}
-
 // stringWriter is the interface that wraps the WriteString method.
 type stringWriter interface {
 	WriteString(s string) (n int, err error)
@@ -306,6 +300,7 @@ func WriteString(w Writer, s string) (n int, err error) {
 // ReadAtLeast returns ErrUnexpectedEOF.
 // If min is greater than the length of buf, ReadAtLeast returns ErrShortBuffer.
 // On return, n >= min if and only if err == nil.
+// If r returns an error having read at least min bytes, the error is dropped.
 func ReadAtLeast(r Reader, buf []byte, min int) (n int, err error) {
 	if len(buf) < min {
 		return 0, ErrShortBuffer
@@ -329,6 +324,7 @@ func ReadAtLeast(r Reader, buf []byte, min int) (n int, err error) {
 // If an EOF happens after reading some but not all the bytes,
 // ReadFull returns ErrUnexpectedEOF.
 // On return, n == len(buf) if and only if err == nil.
+// If r returns an error having read at least len(buf) bytes, the error is dropped.
 func ReadFull(r Reader, buf []byte) (n int, err error) {
 	return ReadAtLeast(r, buf, len(buf))
 }
@@ -392,7 +388,15 @@ func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 		return rt.ReadFrom(src)
 	}
 	if buf == nil {
-		buf = make([]byte, 32*1024)
+		size := 32 * 1024
+		if l, ok := src.(*LimitedReader); ok && int64(size) > l.N {
+			if l.N < 1 {
+				size = 1
+			} else {
+				size = int(l.N)
+			}
+		}
+		buf = make([]byte, size)
 	}
 	for {
 		nr, er := src.Read(buf)
@@ -410,11 +414,10 @@ func copyBuffer(dst Writer, src Reader, buf []byte) (written int64, err error) {
 				break
 			}
 		}
-		if er == EOF {
-			break
-		}
 		if er != nil {
-			err = er
+			if er != EOF {
+				err = er
+			}
 			break
 		}
 	}
@@ -429,6 +432,7 @@ func LimitReader(r Reader, n int64) Reader { return &LimitedReader{r, n} }
 // A LimitedReader reads from R but limits the amount of
 // data returned to just N bytes. Each call to Read
 // updates N to reflect the new amount remaining.
+// Read returns EOF when N <= 0 or when the underlying R returns EOF.
 type LimitedReader struct {
 	R Reader // underlying reader
 	N int64  // max bytes remaining

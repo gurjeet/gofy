@@ -114,18 +114,19 @@ func initConfVal() {
 // canUseCgo reports whether calling cgo functions is allowed
 // for non-hostname lookups.
 func (c *conf) canUseCgo() bool {
-	return c.hostLookupOrder("") == hostLookupCgo
+	return c.hostLookupOrder(nil, "") == hostLookupCgo
 }
 
 // hostLookupOrder determines which strategy to use to resolve hostname.
-func (c *conf) hostLookupOrder(hostname string) (ret hostLookupOrder) {
+// The provided Resolver is optional. nil means to not consider its options.
+func (c *conf) hostLookupOrder(r *Resolver, hostname string) (ret hostLookupOrder) {
 	if c.dnsDebugLevel > 1 {
 		defer func() {
 			print("go package net: hostLookupOrder(", hostname, ") = ", ret.String(), "\n")
 		}()
 	}
 	fallbackOrder := hostLookupCgo
-	if c.netGo {
+	if c.netGo || r.preferGo() {
 		fallbackOrder = hostLookupFilesDNS
 	}
 	if c.forceCgoLookupHost || c.resolv.unknownOpt || c.goos == "android" {
@@ -148,7 +149,7 @@ func (c *conf) hostLookupOrder(hostname string) (ret hostLookupOrder) {
 		}
 		lookup := c.resolv.lookup
 		if len(lookup) == 0 {
-			// http://www.openbsd.org/cgi-bin/man.cgi/OpenBSD-current/man5/resolv.conf.5
+			// https://www.openbsd.org/cgi-bin/man.cgi/OpenBSD-current/man5/resolv.conf.5
 			// "If the lookup keyword is not used in the
 			// system's resolv.conf file then the assumed
 			// order is 'bind file'"
@@ -179,8 +180,6 @@ func (c *conf) hostLookupOrder(hostname string) (ret hostLookupOrder) {
 		}
 	}
 
-	hasDot := byteIndex(hostname, '.') != -1
-
 	// Canonicalize the hostname by removing any trailing dot.
 	if stringsHasSuffix(hostname, ".") {
 		hostname = hostname[:len(hostname)-1]
@@ -204,7 +203,7 @@ func (c *conf) hostLookupOrder(hostname string) (ret hostLookupOrder) {
 		}
 		if c.goos == "linux" {
 			// glibc says the default is "dns [!UNAVAIL=return] files"
-			// http://www.gnu.org/software/libc/manual/html_node/Notes-on-NSS-Configuration-File.html.
+			// https://www.gnu.org/software/libc/manual/html_node/Notes-on-NSS-Configuration-File.html.
 			return hostLookupDNSFiles
 		}
 		return hostLookupFilesDNS
@@ -220,10 +219,14 @@ func (c *conf) hostLookupOrder(hostname string) (ret hostLookupOrder) {
 	var first string
 	for _, src := range srcs {
 		if src.source == "myhostname" {
-			if hostname == "" || hasDot {
-				continue
+			if isLocalhost(hostname) || isGateway(hostname) {
+				return fallbackOrder
 			}
-			return fallbackOrder
+			hn, err := getHostname()
+			if err != nil || stringsEqualFold(hostname, hn) {
+				return fallbackOrder
+			}
+			continue
 		}
 		if src.source == "files" || src.source == "dns" {
 			if !src.standardCriteria() {
@@ -293,7 +296,7 @@ func goDebugNetDNS() (dnsMode string, debugLevel int) {
 			return
 		}
 		if '0' <= s[0] && s[0] <= '9' {
-			debugLevel, _, _ = dtoi(s, 0)
+			debugLevel, _, _ = dtoi(s)
 		} else {
 			dnsMode = s
 		}
@@ -305,4 +308,16 @@ func goDebugNetDNS() (dnsMode string, debugLevel int) {
 	}
 	parsePart(goDebug)
 	return
+}
+
+// isLocalhost reports whether h should be considered a "localhost"
+// name for the myhostname NSS module.
+func isLocalhost(h string) bool {
+	return stringsEqualFold(h, "localhost") || stringsEqualFold(h, "localhost.localdomain") || stringsHasSuffixFold(h, ".localhost") || stringsHasSuffixFold(h, ".localhost.localdomain")
+}
+
+// isGateway reports whether h should be considered a "gateway"
+// name for the myhostname NSS module.
+func isGateway(h string) bool {
+	return stringsEqualFold(h, "gateway")
 }

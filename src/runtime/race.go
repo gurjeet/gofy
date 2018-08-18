@@ -4,23 +4,88 @@
 
 // +build race
 
-// Public race detection API, present iff build with -race.
-
 package runtime
 
 import (
 	"unsafe"
 )
 
+// Public race detection API, present iff build with -race.
+
 func RaceRead(addr unsafe.Pointer)
 func RaceWrite(addr unsafe.Pointer)
 func RaceReadRange(addr unsafe.Pointer, len int)
 func RaceWriteRange(addr unsafe.Pointer, len int)
 
-func RaceSemacquire(s *uint32)
-func RaceSemrelease(s *uint32)
+func RaceErrors() int {
+	var n uint64
+	racecall(&__tsan_report_count, uintptr(unsafe.Pointer(&n)), 0, 0, 0)
+	return int(n)
+}
 
-// private interface for the runtime
+//go:nosplit
+
+// RaceAcquire/RaceRelease/RaceReleaseMerge establish happens-before relations
+// between goroutines. These inform the race detector about actual synchronization
+// that it can't see for some reason (e.g. synchronization within RaceDisable/RaceEnable
+// sections of code).
+// RaceAcquire establishes a happens-before relation with the preceding
+// RaceReleaseMerge on addr up to and including the last RaceRelease on addr.
+// In terms of the C memory model (C11 §5.1.2.4, §7.17.3),
+// RaceAcquire is equivalent to atomic_load(memory_order_acquire).
+func RaceAcquire(addr unsafe.Pointer) {
+	raceacquire(addr)
+}
+
+//go:nosplit
+
+// RaceRelease performs a release operation on addr that
+// can synchronize with a later RaceAcquire on addr.
+//
+// In terms of the C memory model, RaceRelease is equivalent to
+// atomic_store(memory_order_release).
+func RaceRelease(addr unsafe.Pointer) {
+	racerelease(addr)
+}
+
+//go:nosplit
+
+// RaceReleaseMerge is like RaceRelease, but also establishes a happens-before
+// relation with the preceding RaceRelease or RaceReleaseMerge on addr.
+//
+// In terms of the C memory model, RaceReleaseMerge is equivalent to
+// atomic_exchange(memory_order_release).
+func RaceReleaseMerge(addr unsafe.Pointer) {
+	racereleasemerge(addr)
+}
+
+//go:nosplit
+
+// RaceDisable disables handling of race synchronization events in the current goroutine.
+// Handling is re-enabled with RaceEnable. RaceDisable/RaceEnable can be nested.
+// Non-synchronization events (memory accesses, function entry/exit) still affect
+// the race detector.
+func RaceDisable() {
+	_g_ := getg()
+	if _g_.raceignore == 0 {
+		racecall(&__tsan_go_ignore_sync_begin, _g_.racectx, 0, 0, 0)
+	}
+	_g_.raceignore++
+}
+
+//go:nosplit
+
+// RaceEnable re-enables handling of race events in the current goroutine.
+func RaceEnable() {
+	_g_ := getg()
+	_g_.raceignore--
+	if _g_.raceignore == 0 {
+		racecall(&__tsan_go_ignore_sync_end, _g_.racectx, 0, 0, 0)
+	}
+}
+
+// Private interface for the runtime.
+
 const raceenabled = true
 
 // For all functions accepting callerpc and pc,
@@ -91,23 +156,23 @@ func racecallback(cmd uintptr, ctx unsafe.Pointer) {
 }
 
 func raceSymbolizeCode(ctx *symbolizeCodeContext) {
-	f := findfunc(ctx.pc)
-	if f == nil {
-		ctx.fn = &qq[0]
-		ctx.file = &dash[0]
-		ctx.line = 0
-		ctx.off = ctx.pc
-		ctx.res = 1
-		return
+	f := FuncForPC(ctx.pc)
+	if f != nil {
+		file, line := f.FileLine(ctx.pc)
+		if line != 0 {
+			ctx.fn = cfuncname(f.funcInfo())
+			ctx.line = uintptr(line)
+			ctx.file = &bytes(file)[0] // assume NUL-terminated
+			ctx.off = ctx.pc - f.Entry()
+			ctx.res = 1
+			return
+		}
 	}
-
-	ctx.fn = cfuncname(f)
-	file, line := funcline(f, ctx.pc)
-	ctx.line = uintptr(line)
-	ctx.file = &bytes(file)[0] // assume NUL-terminated
-	ctx.off = ctx.pc - f.entry
+	ctx.fn = &qq[0]
+	ctx.file = &dash[0]
+	ctx.line = 0
+	ctx.off = ctx.pc
 	ctx.res = 1
-	return
 }
 
 type symbolizeDataContext struct {
@@ -122,10 +187,10 @@ type symbolizeDataContext struct {
 }
 
 func raceSymbolizeData(ctx *symbolizeDataContext) {
-	if _, x, n := findObject(unsafe.Pointer(ctx.addr)); x != nil {
+	if base, span, _ := findObject(ctx.addr, 0, 0); base != 0 {
 		ctx.heap = 1
-		ctx.start = uintptr(x)
-		ctx.size = n
+		ctx.start = base
+		ctx.size = span.elemsize
 		ctx.res = 1
 	}
 }
@@ -176,6 +241,9 @@ var __tsan_go_ignore_sync_begin byte
 //go:linkname __tsan_go_ignore_sync_end __tsan_go_ignore_sync_end
 var __tsan_go_ignore_sync_end byte
 
+//go:linkname __tsan_report_count __tsan_report_count
+var __tsan_report_count byte
+
 // Mimic what cmd/cgo would do.
 //go:cgo_import_static __tsan_init
 //go:cgo_import_static __tsan_fini
@@ -192,6 +260,7 @@ var __tsan_go_ignore_sync_end byte
 //go:cgo_import_static __tsan_release_merge
 //go:cgo_import_static __tsan_go_ignore_sync_begin
 //go:cgo_import_static __tsan_go_ignore_sync_end
+//go:cgo_import_static __tsan_report_count
 
 // These are called from race_amd64.s.
 //go:cgo_import_static __tsan_read
@@ -223,6 +292,7 @@ var racearenastart uintptr
 var racearenaend uintptr
 
 func racefuncenter(uintptr)
+func racefuncenterfp()
 func racefuncexit()
 func racereadrangepc1(uintptr, uintptr, uintptr)
 func racewriterangepc1(uintptr, uintptr, uintptr)
@@ -425,44 +495,4 @@ func racereleasemergeg(gp *g, addr unsafe.Pointer) {
 //go:nosplit
 func racefingo() {
 	racecall(&__tsan_finalizer_goroutine, getg().racectx, 0, 0, 0)
-}
-
-//go:nosplit
-
-func RaceAcquire(addr unsafe.Pointer) {
-	raceacquire(addr)
-}
-
-//go:nosplit
-
-func RaceRelease(addr unsafe.Pointer) {
-	racerelease(addr)
-}
-
-//go:nosplit
-
-func RaceReleaseMerge(addr unsafe.Pointer) {
-	racereleasemerge(addr)
-}
-
-//go:nosplit
-
-// RaceDisable disables handling of race events in the current goroutine.
-func RaceDisable() {
-	_g_ := getg()
-	if _g_.raceignore == 0 {
-		racecall(&__tsan_go_ignore_sync_begin, _g_.racectx, 0, 0, 0)
-	}
-	_g_.raceignore++
-}
-
-//go:nosplit
-
-// RaceEnable re-enables handling of race events in the current goroutine.
-func RaceEnable() {
-	_g_ := getg()
-	_g_.raceignore--
-	if _g_.raceignore == 0 {
-		racecall(&__tsan_go_ignore_sync_end, _g_.racectx, 0, 0, 0)
-	}
 }

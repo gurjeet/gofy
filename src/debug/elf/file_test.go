@@ -492,6 +492,63 @@ var relocationTests = []relocationTest{
 		},
 	},
 	{
+		"testdata/go-relocation-test-gcc620-sparc64.obj",
+		[]relocationTestEntry{
+			{0, &dwarf.Entry{
+				Offset:   0xb,
+				Tag:      dwarf.TagCompileUnit,
+				Children: true,
+				Field: []dwarf.Field{
+					{Attr: dwarf.AttrProducer, Val: "GNU C11 6.2.0 20160914 -mcpu=v9 -g -fstack-protector-strong", Class: dwarf.ClassString},
+					{Attr: dwarf.AttrLanguage, Val: int64(12), Class: dwarf.ClassConstant},
+					{Attr: dwarf.AttrName, Val: "hello.c", Class: dwarf.ClassString},
+					{Attr: dwarf.AttrCompDir, Val: "/tmp", Class: dwarf.ClassString},
+					{Attr: dwarf.AttrLowpc, Val: uint64(0x0), Class: dwarf.ClassAddress},
+					{Attr: dwarf.AttrHighpc, Val: int64(0x2c), Class: dwarf.ClassConstant},
+					{Attr: dwarf.AttrStmtList, Val: int64(0), Class: dwarf.ClassLinePtr},
+				},
+			}},
+		},
+	},
+	{
+		"testdata/go-relocation-test-gcc492-mipsle.obj",
+		[]relocationTestEntry{
+			{0, &dwarf.Entry{
+				Offset:   0xb,
+				Tag:      dwarf.TagCompileUnit,
+				Children: true,
+				Field: []dwarf.Field{
+					{Attr: dwarf.AttrProducer, Val: "GNU C 4.9.2 -mel -march=mips2 -mtune=mips32 -mllsc -mno-shared -mabi=32 -g", Class: dwarf.ClassString},
+					{Attr: dwarf.AttrLanguage, Val: int64(1), Class: dwarf.ClassConstant},
+					{Attr: dwarf.AttrName, Val: "hello.c", Class: dwarf.ClassString},
+					{Attr: dwarf.AttrCompDir, Val: "/tmp", Class: dwarf.ClassString},
+					{Attr: dwarf.AttrLowpc, Val: uint64(0x0), Class: dwarf.ClassAddress},
+					{Attr: dwarf.AttrHighpc, Val: int64(0x58), Class: dwarf.ClassConstant},
+					{Attr: dwarf.AttrStmtList, Val: int64(0), Class: dwarf.ClassLinePtr},
+				},
+			}},
+		},
+	},
+	{
+		"testdata/go-relocation-test-gcc540-mips.obj",
+		[]relocationTestEntry{
+			{0, &dwarf.Entry{
+				Offset:   0xb,
+				Tag:      dwarf.TagCompileUnit,
+				Children: true,
+				Field: []dwarf.Field{
+					{Attr: dwarf.AttrProducer, Val: "GNU C11 5.4.0 20160609 -meb -mips32 -mtune=mips32r2 -mfpxx -mllsc -mno-shared -mabi=32 -g -gdwarf-2", Class: dwarf.ClassString},
+					{Attr: dwarf.AttrLanguage, Val: int64(12), Class: dwarf.ClassConstant},
+					{Attr: dwarf.AttrName, Val: "hello.c", Class: dwarf.ClassString},
+					{Attr: dwarf.AttrCompDir, Val: "/tmp", Class: dwarf.ClassString},
+					{Attr: dwarf.AttrLowpc, Val: uint64(0x0), Class: dwarf.ClassAddress},
+					{Attr: dwarf.AttrHighpc, Val: uint64(0x5c), Class: dwarf.ClassAddress},
+					{Attr: dwarf.AttrStmtList, Val: int64(0), Class: dwarf.ClassLinePtr},
+				},
+			}},
+		},
+	},
+	{
 		"testdata/go-relocation-test-gcc493-mips64le.obj",
 		[]relocationTestEntry{
 			{0, &dwarf.Entry{
@@ -505,6 +562,25 @@ var relocationTests = []relocationTest{
 					{Attr: dwarf.AttrCompDir, Val: "/tmp", Class: dwarf.ClassString},
 					{Attr: dwarf.AttrLowpc, Val: uint64(0x0), Class: dwarf.ClassAddress},
 					{Attr: dwarf.AttrHighpc, Val: int64(100), Class: dwarf.ClassConstant},
+					{Attr: dwarf.AttrStmtList, Val: int64(0), Class: dwarf.ClassLinePtr},
+				},
+			}},
+		},
+	},
+	{
+		"testdata/go-relocation-test-gcc720-riscv64.obj",
+		[]relocationTestEntry{
+			{0, &dwarf.Entry{
+				Offset:   0xb,
+				Tag:      dwarf.TagCompileUnit,
+				Children: true,
+				Field: []dwarf.Field{
+					{Attr: dwarf.AttrProducer, Val: "GNU C11 7.2.0 -march=rv64imafdc -mabi=lp64d -g -gdwarf-2", Class: dwarf.ClassString},
+					{Attr: dwarf.AttrLanguage, Val: int64(12), Class: dwarf.ClassConstant},
+					{Attr: dwarf.AttrName, Val: "hello.c", Class: dwarf.ClassString},
+					{Attr: dwarf.AttrCompDir, Val: "/tmp", Class: dwarf.ClassString},
+					{Attr: dwarf.AttrLowpc, Val: uint64(0x0), Class: dwarf.ClassAddress},
+					{Attr: dwarf.AttrHighpc, Val: uint64(0x2c), Class: dwarf.ClassAddress},
 					{Attr: dwarf.AttrStmtList, Val: int64(0), Class: dwarf.ClassLinePtr},
 				},
 			}},
@@ -706,9 +782,10 @@ func TestCompressedSection(t *testing.T) {
 }
 
 func TestNoSectionOverlaps(t *testing.T) {
-	// Ensure 6l outputs sections without overlaps.
-	if runtime.GOOS != "linux" && runtime.GOOS != "freebsd" {
-		return // not ELF
+	// Ensure cmd/link outputs sections without overlaps.
+	switch runtime.GOOS {
+	case "android", "darwin", "js", "nacl", "plan9", "windows":
+		t.Skipf("cmd/link doesn't produce ELF binaries on %s", runtime.GOOS)
 	}
 	_ = net.ResolveIPAddr // force dynamic linkage
 	f, err := Open(os.Args[0])

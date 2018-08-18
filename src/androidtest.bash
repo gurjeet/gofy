@@ -23,10 +23,7 @@ if [ "$GOOS" != "android" ]; then
 	exit 1
 fi
 
-if [ -z $GOARM ]; then
-	export GOARM=7
-fi
-if [ "$GOARM" != "7" ]; then
+if [ -n "$GOARM" ] && [ "$GOARM" != "7" ]; then
 	echo "android only supports GOARM=7, got GOARM=$GOARM" 1>&2
 	exit 1
 fi
@@ -42,6 +39,12 @@ export PATH=$GOROOT/bin:$PATH
 GOOS=$GOHOSTOS GOARCH=$GOHOSTARCH go build \
 	-o ../bin/go_android_${GOARCH}_exec \
 	../misc/android/go_android_exec.go
+
+export pkgdir=$(dirname $(go list -f '{{.Target}}' runtime))
+if [ "$pkgdir" = "" ]; then
+	echo "could not find android pkg dir" 1>&2
+	exit 1
+fi
 
 export ANDROID_TEST_DIR=/tmp/androidtest-$$
 
@@ -64,19 +67,11 @@ mkdir -p $FAKE_GOROOT/pkg
 cp -a "${GOROOT}/src" "${FAKE_GOROOT}/"
 cp -a "${GOROOT}/test" "${FAKE_GOROOT}/"
 cp -a "${GOROOT}/lib" "${FAKE_GOROOT}/"
-
-# For android, the go tool will install the compiled package in
-# pkg/android_${GOARCH}_shared directory by default, not in
-# the usual pkg/${GOOS}_${GOARCH}. Some tests in src/go/* assume
-# the compiled packages were installed in the usual places.
-# Instead of reflecting this exception into the go/* packages,
-# we copy the compiled packages into the usual places.
-cp -a "${GOROOT}/pkg/android_${GOARCH}_shared" "${FAKE_GOROOT}/pkg/"
-mv "${FAKE_GOROOT}/pkg/android_${GOARCH}_shared" "${FAKE_GOROOT}/pkg/android_${GOARCH}"
+cp -a "${pkgdir}" "${FAKE_GOROOT}/pkg/"
 
 echo '# Syncing test files to android device'
-adb shell mkdir -p /data/local/tmp/goroot
-time adb sync data &> /dev/null
+adb $GOANDROID_ADB_FLAGS shell mkdir -p /data/local/tmp/goroot
+time adb $GOANDROID_ADB_FLAGS sync data &> /dev/null
 
 export CLEANER=${ANDROID_TEST_DIR}/androidcleaner-$$
 cp ../misc/android/cleaner.go $CLEANER.go
@@ -84,8 +79,8 @@ echo 'var files = `' >> $CLEANER.go
 (cd $ANDROID_PRODUCT_OUT/data/local/tmp/goroot; find . >> $CLEANER.go)
 echo '`' >> $CLEANER.go
 go build -o $CLEANER $CLEANER.go
-adb push $CLEANER /data/local/tmp/cleaner
-adb shell /data/local/tmp/cleaner
+adb $GOANDROID_ADB_FLAGS push $CLEANER /data/local/tmp/cleaner
+adb $GOANDROID_ADB_FLAGS shell /data/local/tmp/cleaner
 
 echo ''
 

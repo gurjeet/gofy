@@ -29,15 +29,27 @@ func ResetSIGIO() {
 	signal.Reset(syscall.SIGIO)
 }
 
-// SawSIGIO returns whether we saw a SIGIO within a brief pause.
+// SawSIGIO reports whether we saw a SIGIO.
 //export SawSIGIO
 func SawSIGIO() C.int {
 	select {
 	case <-sigioChan:
 		return 1
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 		return 0
 	}
+}
+
+// ProvokeSIGPIPE provokes a kernel-initiated SIGPIPE.
+//export ProvokeSIGPIPE
+func ProvokeSIGPIPE() {
+	r, w, err := os.Pipe()
+	if err != nil {
+		panic(err)
+	}
+	r.Close()
+	defer w.Close()
+	w.Write([]byte("some data"))
 }
 
 func main() {

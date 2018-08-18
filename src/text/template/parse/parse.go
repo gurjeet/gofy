@@ -157,7 +157,7 @@ func (t *Tree) ErrorContext(n Node) (location, context string) {
 // errorf formats the error and terminates processing.
 func (t *Tree) errorf(format string, args ...interface{}) {
 	t.Root = nil
-	format = fmt.Sprintf("template: %s:%d: %s", t.ParseName, t.lex.lineNumber(), format)
+	format = fmt.Sprintf("template: %s:%d: %s", t.ParseName, t.token[0].line, format)
 	panic(fmt.Errorf(format, args...))
 }
 
@@ -202,7 +202,6 @@ func (t *Tree) recover(errp *error) {
 		}
 		*errp = e.(error)
 	}
-	return
 }
 
 // startParse initializes the parser, using the lexer.
@@ -277,7 +276,7 @@ func IsEmptyTree(n Node) bool {
 // parse is the top-level parser for a template, essentially the same
 // as itemList except it also parses {{define}} actions.
 // It runs to EOF.
-func (t *Tree) parse() (next Node) {
+func (t *Tree) parse() {
 	t.Root = t.newList(t.peek().pos)
 	for t.peek().typ != itemEOF {
 		if t.peek().typ == itemLeftDelim {
@@ -299,7 +298,6 @@ func (t *Tree) parse() (next Node) {
 			t.Root.append(n)
 		}
 	}
-	return nil
 }
 
 // parseDefinition parses a {{define}} ...  {{end}} template definition and
@@ -377,16 +375,19 @@ func (t *Tree) action() (n Node) {
 		return t.withControl()
 	}
 	t.backup()
+	token := t.peek()
 	// Do not pop variables; they persist until "end".
-	return t.newAction(t.peek().pos, t.lex.lineNumber(), t.pipeline("command"))
+	return t.newAction(token.pos, token.line, t.pipeline("command"))
 }
 
 // Pipeline:
 //	declarations? command ('|' command)*
 func (t *Tree) pipeline(context string) (pipe *PipeNode) {
-	var decl []*VariableNode
-	pos := t.peekNonSpace().pos
-	// Are there declarations?
+	decl := false
+	var vars []*VariableNode
+	token := t.peekNonSpace()
+	pos := token.pos
+	// Are there declarations or assignments?
 	for {
 		if v := t.peekNonSpace(); v.typ == itemVariable {
 			t.next()
@@ -395,26 +396,33 @@ func (t *Tree) pipeline(context string) (pipe *PipeNode) {
 			// argument variable rather than a declaration. So remember the token
 			// adjacent to the variable so we can push it back if necessary.
 			tokenAfterVariable := t.peek()
-			if next := t.peekNonSpace(); next.typ == itemColonEquals || (next.typ == itemChar && next.val == ",") {
+			next := t.peekNonSpace()
+			switch {
+			case next.typ == itemAssign, next.typ == itemDeclare,
+				next.typ == itemChar && next.val == ",":
 				t.nextNonSpace()
 				variable := t.newVariable(v.pos, v.val)
-				decl = append(decl, variable)
+				vars = append(vars, variable)
 				t.vars = append(t.vars, v.val)
+				if next.typ == itemDeclare {
+					decl = true
+				}
 				if next.typ == itemChar && next.val == "," {
-					if context == "range" && len(decl) < 2 {
+					if context == "range" && len(vars) < 2 {
 						continue
 					}
 					t.errorf("too many declarations in %s", context)
 				}
-			} else if tokenAfterVariable.typ == itemSpace {
+			case tokenAfterVariable.typ == itemSpace:
 				t.backup3(v, tokenAfterVariable)
-			} else {
+			default:
 				t.backup2(v)
 			}
 		}
 		break
 	}
-	pipe = t.newPipeline(pos, t.lex.lineNumber(), decl)
+	pipe = t.newPipeline(pos, token.line, vars)
+	pipe.IsAssign = !decl
 	for {
 		switch token := t.nextNonSpace(); token.typ {
 		case itemRightDelim, itemRightParen:
@@ -451,7 +459,6 @@ func (t *Tree) checkPipeline(pipe *PipeNode, context string) {
 
 func (t *Tree) parseControl(allowElseIf bool, context string) (pos Pos, line int, pipe *PipeNode, list, elseList *ListNode) {
 	defer t.popVars(len(t.vars))
-	line = t.lex.lineNumber()
 	pipe = t.pipeline(context)
 	var next Node
 	list, next = t.itemList()
@@ -480,7 +487,7 @@ func (t *Tree) parseControl(allowElseIf bool, context string) (pos Pos, line int
 			t.errorf("expected end; found %s", next)
 		}
 	}
-	return pipe.Position(), line, pipe, list, elseList
+	return pipe.Position(), pipe.Line, pipe, list, elseList
 }
 
 // If:
@@ -522,9 +529,10 @@ func (t *Tree) elseControl() Node {
 	peek := t.peekNonSpace()
 	if peek.typ == itemIf {
 		// We see "{{else if ... " but in effect rewrite it to {{else}}{{if ... ".
-		return t.newElse(peek.pos, t.lex.lineNumber())
+		return t.newElse(peek.pos, peek.line)
 	}
-	return t.newElse(t.expect(itemRightDelim, "else").pos, t.lex.lineNumber())
+	token := t.expect(itemRightDelim, "else")
+	return t.newElse(token.pos, token.line)
 }
 
 // Block:
@@ -551,7 +559,7 @@ func (t *Tree) blockControl() Node {
 	block.add()
 	block.stopParse()
 
-	return t.newTemplate(token.pos, t.lex.lineNumber(), name, pipe)
+	return t.newTemplate(token.pos, token.line, name, pipe)
 }
 
 // Template:
@@ -568,7 +576,7 @@ func (t *Tree) templateControl() Node {
 		// Do not pop variables; they persist until "end".
 		pipe = t.pipeline(context)
 	}
-	return t.newTemplate(token.pos, t.lex.lineNumber(), name, pipe)
+	return t.newTemplate(token.pos, token.line, name, pipe)
 }
 
 func (t *Tree) parseTemplateName(token item, context string) (name string) {

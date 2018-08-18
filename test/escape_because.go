@@ -30,22 +30,22 @@ func (p *pair) EqualParts() bool { // ERROR "\(\*pair\).EqualParts p does not es
 	return p != nil && (p.x == p.y || *p.x == *p.y)
 }
 
-func f1(p *int) { // ERROR "from \[3\]\*int literal \(array literal element\) at escape_because.go:34$" "from a \(assigned\) at escape_because.go:34$" "from a \(interface-converted\) at escape_because.go:35$" "from sink \(assigned to top level variable\) at escape_because.go:19$" "leaking param: p$"
+func f1(p *int) { // ERROR "from \[3\]\*int literal \(array literal element\) at escape_because.go:34$" "from a \(assigned\) at escape_because.go:34$" "from a \(interface-converted\) at escape_because.go:35$" "from sink \(assigned to top level variable\) at escape_because.go:35$" "leaking param: p$"
 	a := [3]*int{p, nil, nil}
-	sink = a // ERROR "a escapes to heap$" "from sink \(assigned to top level variable\) at escape_because.go:19$"
+	sink = a // ERROR "a escapes to heap$" "from sink \(assigned to top level variable\) at escape_because.go:35$"
 
 }
 
-func f2(q *int) { // ERROR "from &u \(address-of\) at escape_because.go:43$" "from &u \(interface-converted\) at escape_because.go:43$" "from pair literal \(struct literal element\) at escape_because.go:41$" "from s \(assigned\) at escape_because.go:40$" "from sink \(assigned to top level variable\) at escape_because.go:19$" "from t \(assigned\) at escape_because.go:41$" "from u \(assigned\) at escape_because.go:42$" "leaking param: q$"
+func f2(q *int) { // ERROR "from &u \(address-of\) at escape_because.go:43$" "from &u \(interface-converted\) at escape_because.go:43$" "from pair literal \(struct literal element\) at escape_because.go:41$" "from s \(assigned\) at escape_because.go:40$" "from sink \(assigned to top level variable\) at escape_because.go:43$" "from t \(assigned\) at escape_because.go:41$" "from u \(assigned\) at escape_because.go:42$" "leaking param: q$"
 	s := q
 	t := pair{s, nil}
 	u := t    // ERROR "moved to heap: u$"
-	sink = &u // ERROR "&u escapes to heap$" "from &u \(interface-converted\) at escape_because.go:43$" "from sink \(assigned to top level variable\) at escape_because.go:19$"
+	sink = &u // ERROR "&u escapes to heap$" "from &u \(interface-converted\) at escape_because.go:43$" "from sink \(assigned to top level variable\) at escape_because.go:43$"
 }
 
-func f3(r *int) interface{} { // ERROR "from \[\]\*int literal \(slice-literal-element\) at escape_because.go:47$" "from c \(assigned\) at escape_because.go:47$" "from c \(interface-converted\) at escape_because.go:48$" "from ~r1 \(return\) at escape_because.go:46$" "leaking param: r to result ~r1 level=-1$"
-	c := []*int{r} // ERROR "\[\]\*int literal escapes to heap$" "from c \(assigned\) at escape_because.go:47$" "from c \(interface-converted\) at escape_because.go:48$" "from ~r1 \(return\) at escape_because.go:46$"
-	return c       // "return" // ERROR "c escapes to heap$" "from ~r1 \(return\) at escape_because.go:46$"
+func f3(r *int) interface{} { // ERROR "from \[\]\*int literal \(slice-literal-element\) at escape_because.go:47$" "from c \(assigned\) at escape_because.go:47$" "from c \(interface-converted\) at escape_because.go:48$" "from ~r1 \(return\) at escape_because.go:48$" "leaking param: r to result ~r1 level=-1$"
+	c := []*int{r} // ERROR "\[\]\*int literal escapes to heap$" "from c \(assigned\) at escape_because.go:47$" "from c \(interface-converted\) at escape_because.go:48$" "from ~r1 \(return\) at escape_because.go:48$"
+	return c       // "return" // ERROR "c escapes to heap$" "from ~r1 \(return\) at escape_because.go:48$"
 }
 
 func f4(a *int, s []*int) int { // ERROR "from \*s \(indirection\) at escape_because.go:51$" "from append\(s, a\) \(appended to slice\) at escape_because.go:52$" "from append\(s, a\) \(appendee slice\) at escape_because.go:52$" "leaking param content: s$" "leaking param: a$"
@@ -73,15 +73,15 @@ func f7(x map[int]*int, y int) *int { // ERROR "f7 x does not escape$"
 	return z
 }
 
-func f8(x int, y *int) *int { // ERROR "from ~r2 \(return\) at escape_because.go:76$" "from ~r2 \(returned from recursive function\) at escape_because.go:76$" "leaking param: y$" "moved to heap: x$"
+func f8(x int, y *int) *int { // ERROR "from ~r2 \(return\) at escape_because.go:78$" "from ~r2 \(returned from recursive function\) at escape_because.go:76$" "leaking param: y$" "moved to heap: x$"
 	if x <= 0 {
 		return y
 	}
 	x--
-	return f8(*y, &x) // ERROR "&x escapes to heap$" "from y \(arg to recursive call\) at escape_because.go:76$" "from ~r2 \(return\) at escape_because.go:76$" "from ~r2 \(returned from recursive function\) at escape_because.go:76$"
+	return f8(*y, &x) // ERROR "&x escapes to heap$" "from y \(arg to recursive call\) at escape_because.go:81$" "from ~r2 \(return\) at escape_because.go:78$" "from ~r2 \(returned from recursive function\) at escape_because.go:76$"
 }
 
-func f9(x int, y ...*int) *int { // ERROR "from y\[0\] \(dot of pointer\) at escape_because.go:86$" "from ~r2 \(return\) at escape_because.go:84$" "from ~r2 \(returned from recursive function\) at escape_because.go:84$" "leaking param content: y$" "leaking param: y to result ~r2 level=1$" "moved to heap: x$"
+func f9(x int, y ...*int) *int { // ERROR "from y\[0\] \(dot of pointer\) at escape_because.go:86$" "from ~r2 \(return\) at escape_because.go:86$" "from ~r2 \(returned from recursive function\) at escape_because.go:84$" "leaking param content: y$" "leaking param: y to result ~r2 level=1$" "moved to heap: x$"
 	if x <= 0 {
 		return y[0]
 	}
@@ -95,7 +95,34 @@ func f10(x map[*int]*int, y, z *int) *int { // ERROR "f10 x does not escape$" "f
 }
 
 func f11(x map[*int]*int, y, z *int) map[*int]*int { // ERROR "f11 x does not escape$" "from map\[\*int\]\*int literal \(map literal key\) at escape_because.go:98$" "from map\[\*int\]\*int literal \(map literal value\) at escape_because.go:98$" "leaking param: y$" "leaking param: z$"
-	return map[*int]*int{y: z} // ERROR "from ~r3 \(return\) at escape_because.go:97$" "map\[\*int\]\*int literal escapes to heap$"
+	return map[*int]*int{y: z} // ERROR "from ~r3 \(return\) at escape_because.go:98$" "map\[\*int\]\*int literal escapes to heap$"
+}
+
+func f12() {
+	b := []byte("test") // ERROR "\(\[\]byte\)\(.test.\) escapes to heap$" "from b \(assigned\) at escape_because.go:102$" "from b \(passed to call\[argument escapes\]\) at escape_because.go:103$"
+	escape(b)
+}
+
+func escape(b []byte) { // ERROR "from panic\(b\) \(panic\) at escape_because.go:107$" "leaking param: b$"
+	panic(b)
+}
+
+func f13() {
+	b := []byte("test") // ERROR "\(\[\]byte\)\(.test.\) escapes to heap$" "from .out0 \(passed-to-and-returned-from-call\) at escape_because.go:112$" "from b \(assigned\) at escape_because.go:111$" "from c \(assigned\) at escape_because.go:112$" "from c \(passed to call\[argument escapes\]\) at escape_because.go:113$"
+	c := transmit(b)
+	escape(c)
+}
+
+//go:noinline
+func transmit(b []byte) []byte { // ERROR "from ~r1 \(return\) at escape_because.go:118$" "leaking param: b to result ~r1 level=0$"
+	return b
+}
+
+func f14() {
+	n := 32
+	s1 := make([]int, n)    // ERROR "make\(\[\]int, n\) escapes to heap" "from make\(\[\]int, n\) \(non-constant size\)"
+	s2 := make([]int, 0, n) // ERROR "make\(\[\]int, 0, n\) escapes to heap" "from make\(\[\]int, 0, n\) \(non-constant size\)"
+	_, _ = s1, s2
 }
 
 // The list below is all of the why-escapes messages seen building the escape analysis tests.
@@ -114,51 +141,40 @@ appended to slice
 appendee slice
 arg to ...
 arg to recursive call
-array literal element
 array-element-equals
-assign-pair
-assign-pair-dot-type
-assign-pair-func-call
+array literal element
 assigned
 assigned to top level variable
-call part
+assign-pair-dot-type
+assign-pair-func-call
 captured by a closure
-closure-var
-converted
-copied slice
-defer func
-defer func ...
-defer func arg
+captured by called closure
 dot
-dot of pointer
 dot-equals
+dot of pointer
 fixed-array-index-of
-go func
-go func ...
 go func arg
 indirection
 interface-converted
 key of map put
 map literal key
 map literal value
+non-constant size
+panic
 parameter to indirect call
-passed to function[content escapes]
-passed to function[unknown]
-passed-to-and-returned-from-function
+passed-to-and-returned-from-call
+passed to call[argument content escapes]
+passed to call[argument escapes]
 pointer literal
-range
 range-deref
 receiver in indirect call
 return
 returned from recursive function
-send
-slice
 slice-element-equals
 slice-literal-element
 star-dot-equals
 star-equals
 struct literal element
-switch case
 too large for stack
 value of map put
 */
@@ -171,7 +187,6 @@ assign-pair-mapr
 assign-pair-receive
 call receiver
 map index
-panic
 pointer literal [assign]
 slice literal element
 */

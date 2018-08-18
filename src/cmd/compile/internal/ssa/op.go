@@ -21,12 +21,22 @@ type opInfo struct {
 	name              string
 	reg               regInfo
 	auxType           auxType
-	argLen            int32 // the number of arugments, -1 if variable length
+	argLen            int32 // the number of arguments, -1 if variable length
 	asm               obj.As
-	generic           bool // this is a generic (arch-independent) opcode
-	rematerializeable bool // this op is rematerializeable
-	commutative       bool // this operation is commutative (e.g. addition)
-	resultInArg0      bool // v and v.Args[0] must be allocated to the same register
+	generic           bool      // this is a generic (arch-independent) opcode
+	rematerializeable bool      // this op is rematerializeable
+	commutative       bool      // this operation is commutative (e.g. addition)
+	resultInArg0      bool      // (first, if a tuple) output of v and v.Args[0] must be allocated to the same register
+	resultNotInArgs   bool      // outputs must not be allocated to the same registers as inputs
+	clobberFlags      bool      // this op clobbers flags register
+	call              bool      // is a function call
+	nilCheck          bool      // this op is a nil check on arg0
+	faultOnNilArg0    bool      // this op will fault if arg0 is nil (and aux encodes a small offset)
+	faultOnNilArg1    bool      // this op will fault if arg1 is nil (and aux encodes a small offset)
+	usesScratch       bool      // this op requires scratch memory space
+	hasSideEffects    bool      // for "reasons", not to be eliminated.  E.g., atomic store, #19182.
+	zeroWidth         bool      // op never translates into any machine code. example: copy, which may sometimes translate to machine code, is not zero-width.
+	symEffect         SymEffect // effect this op has on symbol in aux
 }
 
 type inputInfo struct {
@@ -34,10 +44,15 @@ type inputInfo struct {
 	regs regMask // allowed input registers
 }
 
+type outputInfo struct {
+	idx  int     // index in output tuple
+	regs regMask // allowed output registers
+}
+
 type regInfo struct {
 	inputs   []inputInfo // ordered in register allocation order
 	clobbers regMask
-	outputs  []regMask // NOTE: values can only have 1 output for now.
+	outputs  []outputInfo // ordered in register allocation order
 }
 
 type auxType int8
@@ -53,11 +68,28 @@ const (
 	auxFloat32              // auxInt is a float32 (encoded with math.Float64bits)
 	auxFloat64              // auxInt is a float64 (encoded with math.Float64bits)
 	auxString               // aux is a string
-	auxSym                  // aux is a symbol
+	auxSym                  // aux is a symbol (a *gc.Node for locals or an *obj.LSym for globals)
 	auxSymOff               // aux is a symbol, auxInt is an offset
 	auxSymValAndOff         // aux is a symbol, auxInt is a ValAndOff
+	auxTyp                  // aux is a type
+	auxTypSize              // aux is a type, auxInt is a size, must have Aux.(Type).Size() == AuxInt
+	auxCCop                 // aux is a ssa.Op that represents a flags-to-bool conversion (e.g. LessThan)
 
 	auxSymInt32 // aux is a symbol, auxInt is a 32-bit integer
+)
+
+// A SymEffect describes the effect that an SSA Value has on the variable
+// identified by the symbol in its Aux field.
+type SymEffect int8
+
+const (
+	SymRead SymEffect = 1 << iota
+	SymWrite
+	SymAddr
+
+	SymRdWr = SymRead | SymWrite
+
+	SymNone SymEffect = 0
 )
 
 // A ValAndOff is used by the several opcodes. It holds
