@@ -14,7 +14,7 @@ GoFY is not different from GoLang, yet.
 - Allow local packages to be imported without having to use URL as needed for external packages.
 - Allow parameters to be declared const; intended to protect the values pointed to by the passed-in pointers
 - Accept backslash `\` as a line continuation character; this will allow us to place operators at the beginning of the line.
-- Define truthy and falsy values; at least, allow cheks like if !err {...} instead of if err == nil {...}
+- Define truthy and falsy values; at least, allow cheks like `if !err {...}` instead of `if err == nil {...}`
 - Develop a way to reference just a single return value from a function invocation that returns multiple return values
     This would allow such functions to be used in single-valued contexts, like parameter values to other funcitons.
 
